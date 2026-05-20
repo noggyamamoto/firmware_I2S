@@ -25,6 +25,12 @@
 #include "sdmmc_cmd.h"             // Estruturas e comandos para cartão SD
 #include "esp_vfs_fat.h"           // Sistema de arquivos FAT (montagem do SD)
 
+// =========================== DOUBLE BUFFER CIRCULAR ========================
+#define BLOCK_SAMPLES           4096                  // Amostras por bloco (4096 * 8 = 32KB)
+#define BLOCK_BYTES             (BLOCK_SAMPLES * sizeof(amostra_t)) // 32768 bytes
+#define CIRC_BUFFER_CAPACITY    4                     // Nº máximo de blocos em RAM
+#define DMA_BUFFER_SIZE         8192                  // Buffer interno do driver DMA
+
 // =========================== ESTRUTURAS DE DADOS ==========================
 // Estrutura de uma amostra individual
 typedef struct {
