@@ -16,7 +16,7 @@ O sistema captura uma performance em teclado elétrico e gera automaticamente a 
 
 Para atender ao rigor científico, o projeto adota uma arquitetura híbrida:
 
-- **Entrada MIDI (Musical Instrument Digital Interface)** – referência perfeitamente conhecida – serve como **ground truth** (verdade de campo) para validação.
+- **Entrada MIDI (Musical Instrument Digital Interface)** – referência perfeitamente conhecida – serve como **ground truth** (referência de validação) para comparação objetiva.
 - **Entrada de áudio** (capturada por microfone ou saída de linha) – processada pelo algoritmo de transcrição automática.
 
 Assim é possível medir objetivamente a qualidade da transcrição por áudio, comparando-a com os eventos MIDI registrados simultaneamente. O sistema compõe-se de um subsistema embarcado (ESP32) para captura e envio do sinal de áudio (opcionalmente também do MIDI) e de um aplicativo Flutter que concentra todo o processamento inteligente, a geração da partitura e a validação.
@@ -31,8 +31,8 @@ Assim é possível medir objetivamente a qualidade da transcrição por áudio, 
 │  │ Saída   │─────────────┼──▶│ ESP32            │  │  │ Módulo de Recepção               │    │
 │  │ Áudio   │             │   │ (I2S INMP441 ou  │  │  │ - Buffer de pacotes UDP          │    │
 │  └─────────┘             │   │ entrada direta)  │  │  │ - Reconstrói stream de áudio     │    │
-│                          │   │ - Filtro PB 80-  │  │  └────────────┬─────────────────────┘    │
-│  ┌─────────┐  USB / DIN  │   │   2000 Hz        │  │               │                          │
+│                          │   │ - Filtro passa-banda│  │  └────────────┬─────────────────────┘    │
+│  ┌─────────┐             │   │                  │  │               │                          │
 │  │ Saída   │─────────────┼──▶│ - Normalização   │  │               ▼                          │
 │  │ MIDI    │             │   │ - Buffer circular│  │  ┌──────────────────────────────────┐    │
 │  └─────────┘             │   │ - Encapsulamento │──┼─▶│ Pipeline de Processamento Áudio  │    │
@@ -73,25 +73,26 @@ Assim é possível medir objetivamente a qualidade da transcrição por áudio, 
 └──────────────────────────┘                         └──────────────────────────────────────────┘
 ```
 
-> **Nota:** O áudio pode vir da saída de fone/line do teclado → ESP32 (via microfone I2S, protocolo Inter-IC Sound, com o microfone digital modelo INMP441 — um microfone MEMS de alta qualidade — ou via entrada ADC, Analog-to-Digital Converter, com acoplamento), garantindo sinal limpo e controlado. O MIDI chega por USB diretamente ao Flutter, evitando a necessidade do ESP32 nessa rota.
+> **Nota:** O caminho principal deste projeto usa microfone I2S INMP441. O áudio também pode vir da saída de fone/line do teclado para o ESP32 via entrada ADC (Analog-to-Digital Converter) com acoplamento AC para remover offset DC. Isso ajuda a manter um sinal limpo e controlado.
+> O MIDI pode chegar por USB/DIN ao sistema, e na arquitetura proposta segue diretamente para o Flutter via USB, evitando a necessidade do ESP32 nessa rota.
 
 ## 3. Decisões de Projeto e Fundamentação
 
 ### 3.1 Por que concentrar a inteligência no Flutter, e não no ESP32?
 
-- **Capacidade computacional:** O ESP32 não possui poder de processamento para executar uma FFT (Fast Fourier Transform – Transformada Rápida de Fourier) em tempo real com alta resolução espectral, detecção simultânea de múltiplos pitches (alturas) e comparação com templates complexos de acordes.
+- **Capacidade computacional:** O ESP32 não possui poder de processamento suficiente para executar, com folga em tempo real, uma FFT (Fast Fourier Transform – Transformada Rápida de Fourier) em alta resolução espectral, detecção simultânea de múltiplos pitches (alturas) e comparação com templates complexos de acordes.
 - **Manutenibilidade e depuração:** Todo o código de análise musical reside em um ambiente de desenvolvimento moderno (Dart / C++ via FFI – Foreign Function Interface), com ferramentas robustas de teste e profiling.
 - **Modularidade:** Isolando o hardware embarcado apenas para captura e transmissão, o sistema fica mais simples de validar e pode evoluir independentemente (ex.: substituir o ESP32 por outro módulo de áudio sem afetar o núcleo do projeto).
 
 ### 3.2 Por que usar MIDI como ground truth?
 
-- **Precisão absoluta:** O MIDI fornece exatamente quais notas foram tocadas, com onset (instante de início), duração e velocity (intensidade), sem ambiguidade de altura ou mistura harmônica.
+- **Precisão absoluta:** O MIDI fornece exatamente quais notas foram tocadas, com onset (instante de início), duração e velocity (velocidade/força de toque), sem ambiguidade de altura ou mistura harmônica.
 - **Validação científica robusta:** A transcrição por áudio é um problema complexo (polifonia, ruído, sobreposição espectral). Comparar o resultado do algoritmo com uma referência confiável permite calcular métricas objetivas (erro de nota, atraso de onset etc.), conferindo rigor à pesquisa.
 - **Facilidade para experimentos controlados:** O teclado elétrico garante execuções repetíveis, essenciais para avaliação quantitativa.
 
 ### 3.3 Por que usar Wi-Fi com UDP para áudio, e não BLE ou TCP?
 
-- **BLE:** Largura de banda insuficiente para streaming de áudio contínuo (máximo teórico de ~1.4 Mbps; na prática, apenas rajadas curtas), e alto overhead para pacotes pequenos. Inviável para 16 kHz / 16 bits (taxa de 256 kbps) de forma estável.
+- **BLE:** Largura de banda frequentemente insuficiente para streaming de áudio contínuo de baixa latência (especialmente em cenários BLE 4.x e com overhead prático de enlace/aplicação), e alto overhead para pacotes pequenos. Mesmo para 16 kHz / 16 bits em mono (taxa bruta de 256 kbps), a estabilidade ponta a ponta pode ficar comprometida.
 - **TCP:** Embora confiável, o mecanismo de retransmissão introduz latência acumulada e variações de jitter (variação no atraso) que podem distorcer a linha de tempo, prejudicando a detecção rítmica.
 - **UDP:** Oferece baixa latência e jitter previsível. Perdas ocasionais de pacotes são toleráveis, pois o sistema pode realizar interpolação ou simplesmente lidar com um pequeno gap que não compromete a análise espectral. Para compensar pacotes perdidos, utiliza-se numeração sequencial no cabeçalho do quadro (frame).
 
@@ -143,9 +144,9 @@ Transformar tempos absolutos (em segundos) em figuras musicais (semínima, colch
 
 **Responsabilidades:**
 
-- Aquisição de áudio via I2S (microfone INMP441 ou entrada analógica condicionada via ADC), com taxa de amostragem de 16 kHz / 16 bits (balanço ideal entre qualidade espectral e taxa de dados).
+- Aquisição de áudio via I2S (microfone INMP441 ou entrada analógica condicionada via ADC), com taxa de amostragem de 16 kHz / 16 bits (equilíbrio ideal entre qualidade espectral e taxa de dados).
 - Pré-processamento leve:
-  - Filtro PB (passa-banda) digital (80 Hz – 2 kHz) para remover ruídos fora da faixa útil do teclado.
+  - Filtro passa-banda digital (80 Hz – 2 kHz) para remover ruídos fora da faixa útil do teclado.
   - Normalização de amplitude para evitar saturação.
 - Empacotamento em frames binários com timestamp, sequência e energia.
 - Envio via UDP a cada quadro (ex.: a cada 512 amostras ≈ 32 ms), com buffer circular para absorver bursts (rajadas) de transmissão.
@@ -156,17 +157,17 @@ Transformar tempos absolutos (em segundos) em figuras musicais (semínima, colch
 
 **Módulos:**
 
-- **Receptor UDP:** thread separada que recebe pacotes, trata perdas e monta o buffer contínuo de áudio.
+- **Receptor UDP:** isolate separado que recebe pacotes, trata perdas e monta o buffer contínuo de áudio.
 - **Parser MIDI** (via biblioteca como `flutter_midi_command` ou similar): abstrai eventos MIDI para uma lista de notas com `(midiNote, velocity, startTime, endTime)`, tratando corretamente polifonia e pedal de sustain.
 - **Motor de análise de áudio (C++/FFI):**
   - FFT com janela de Hann (1024 amostras, sobreposição de 50%), gerando espectro de magnitude.
-  - Detecção de pitch por pico espectral refinado: para cada quadro estima a frequência fundamental; converte para número MIDI com a fórmula `69 + 12*log2(f/440)`.
+  - Detecção de pitch por pico espectral refinado: para cada quadro estima a frequência fundamental (`f`, em Hz); converte para número MIDI com a fórmula `midiNote = 69 + 12 * log2(f / 440.0)`.
   - Chroma: reduz o espectro a um vetor de 12 posições (uma por semitom).
   - Detecção de acordes: compara o chroma acumulado em janelas temporais com templates ideais (usando distância do cosseno).
   - Onset: função de detecção baseada na variação da energia espectral entre quadros, com pico seguido de limiar adaptativo.
   - Tracking de notas: associa onsets e offsets (fins de nota) para construir notas contínuas, lidando com sobreposição polifônica limitada.
 - **Validador:**
-  - Casa os eventos detectados por áudio com os eventos MIDI (referência), estabelecendo correspondência ótima por proximidade temporal (< 100 ms) e similaridade de altura.
+  - Casa os eventos detectados por áudio com os eventos MIDI (referência), estabelecendo correspondência ótima por proximidade temporal (< 100 ms, limiar inicial para tolerar jitter de captura/transporte sem perder alinhamento musical) e similaridade de altura.
   - Calcula métricas: precisão, revocação, F1-score por nota; erro absoluto de onset (média e desvio padrão); acurácia de acordes.
 - **Construtor da partitura:**
   - Aplica quantização sobre os eventos MIDI (tempo absoluto) ou, no modo apenas áudio, sobre as notas detectadas.
