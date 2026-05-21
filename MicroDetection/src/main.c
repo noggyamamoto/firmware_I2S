@@ -170,6 +170,87 @@ static int circ_buffer_count(CircularBuffer *cb) {
     return cb->count;                                       // Retorna o contador interno
 }
 
+// ======================= CAPTURADOR I2S ===================================
+/*
+ * Estrutura que representa o periférico I2S.
+ */
+typedef struct {
+    i2s_chan_handle_t rx_handle;    // Handle (descritor) do canal RX do I2S
+} I2SAudioCapturer;
+
+/**
+ * @brief Inicializa o driver I2S no modo mestre RX (Philips).
+ * @param capt Ponteiro para a estrutura I2SAudioCapturer.
+ * @return true se a inicialização foi bem-sucedida.
+ */
+static bool i2s_capturer_init(I2SAudioCapturer *capt) {
+    // Configuração básica do canal: modo mestre, canal RX, seleção automática do controlador
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;                              // Habilita limpeza automática de DMA
+    // Cria o novo canal (parâmetro TX = NULL, pois é apenas recepção)
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &capt->rx_handle));
+
+    // Configuração do formato padrão (Philips/I2S)
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),  // Configura o clock com base na taxa de amostragem
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(BITS_PER_SAMPLE, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,                         // Master clock não usado
+            .bclk = I2S_BCK_PIN,                             // Pino do bit clock
+            .ws   = I2S_WS_PIN,                              // Pino do word select
+            .dout = I2S_GPIO_UNUSED,                         // Saída não usada (somente entrada)
+            .din  = I2S_DATA_IN_PIN,                         // Pino de dados de entrada
+            .invert_flags = {
+                .mclk_inv = false,                           // Não inverte MCLK
+                .bclk_inv = false,                           // Não inverte BCLK
+                .ws_inv   = false,                           // Não inverte WS
+            },
+        },
+    };
+    // Inicializa o canal no modo padrão com as configurações acima
+    esp_err_t ret = i2s_channel_init_std_mode(capt->rx_handle, &std_cfg);
+    return (ret == ESP_OK);                                  // Retorna true se deu certo
+}
+
+/**
+ * @brief Habilita a captura (inicia o DMA).
+ */
+static void i2s_capturer_start(I2SAudioCapturer *capt) {
+    i2s_channel_enable(capt->rx_handle);                     // Ativa o canal I2S
+}
+
+/**
+ * @brief Para a captura (desabilita o canal).
+ */
+static void i2s_capturer_stop(I2SAudioCapturer *capt) {
+    i2s_channel_disable(capt->rx_handle);                    // Desativa o canal I2S
+}
+
+/**
+ * @brief Lê um bloco de amostras do I2S (bloqueante até ter dados suficientes).
+ * @param capt Ponteiro para o capturador.
+ * @param buffer Buffer onde armazenar as amostras (int16_t).
+ * @param num_samples Número de amostras desejadas.
+ * @return Número de bytes lidos com sucesso.
+ */
+static size_t i2s_capturer_read(I2SAudioCapturer *capt, int16_t *buffer, size_t num_samples) {
+    size_t bytes_read = 0;                                   // Inicializa contador de bytes lidos
+    // Leitura bloqueante: aguarda até que todo o buffer seja preenchido
+    esp_err_t ret = i2s_channel_read(capt->rx_handle, buffer, num_samples * sizeof(int16_t),
+                                     &bytes_read, portMAX_DELAY);
+    return (ret == ESP_OK) ? bytes_read : 0;                 // Retorna bytes lidos ou 0 em caso de erro
+}
+
+/**
+ * @brief Libera os recursos do capturador I2S (desabilita canal e deleta handle).
+ */
+static void i2s_capturer_deinit(I2SAudioCapturer *capt) {
+    if (capt->rx_handle) {                                   // Verifica se o handle é válido
+        i2s_channel_disable(capt->rx_handle);               // Desabilita o canal
+        i2s_del_channel(capt->rx_handle);                   // Deleta o canal, liberando recursos
+    }
+}
+
 
 void app_main(void) {
      // --- Configura UART ---
@@ -186,12 +267,6 @@ void app_main(void) {
                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE); // RTS e CTS não usados
     uart_driver_install(UART_PORT, UART_RX_BUF_SIZE,       // Instala o driver UART
                         UART_TX_BUF_SIZE, 0, NULL, 0);
-
     
-
-
-
-
-
-
+    
 }
