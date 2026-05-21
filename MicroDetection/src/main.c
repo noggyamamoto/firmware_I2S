@@ -41,6 +41,33 @@
 #include "esp_netif.h"               // Interface de rede (netif)
 #include "nvs_flash.h"               // Armazenamento não volátil (NVS) para Wi-Fi
 
+// ======================= CONFIGURAÇÕES DE HARDWARE ========================
+// --- UART ---
+#define UART_PORT               UART_NUM_0              // Porta UART0 (conectada ao monitor serial)
+#define UART_TXD_PIN            GPIO_NUM_1              // Pino TX da UART0
+#define UART_RXD_PIN            GPIO_NUM_3              // Pino RX da UART0
+#define UART_BAUDRATE           115200                  // Taxa de transmissão serial (bps)
+#define UART_RX_BUF_SIZE        2048                    // Tamanho do buffer de recepção UART
+#define UART_TX_BUF_SIZE        2048                    // Tamanho do buffer de transmissão UART
+
+// --- I2S (INMP441) ---
+#define I2S_BCK_PIN             GPIO_NUM_26             // Pino do Bit Clock (BCLK) do microfone
+#define I2S_WS_PIN              GPIO_NUM_25             // Pino Word Select (WS/LRCLK) do microfone
+#define I2S_DATA_IN_PIN         GPIO_NUM_33             // Pino de dados de entrada (DIN) do microfone
+
+// --- Parâmetros de áudio ---
+#define SAMPLE_RATE             16000                   // Taxa de amostragem: 16 kHz
+#define BITS_PER_SAMPLE         I2S_DATA_BIT_WIDTH_16BIT // Resolução: 16 bits por amostra
+#define NUM_CHANNELS             1                      // Número de canais: mono
+#define BLOCK_SAMPLES           1024                    // Número de amostras por bloco de processamento
+#define BLOCK_BYTES             (BLOCK_SAMPLES * sizeof(int16_t)) // Tamanho do bloco em bytes
+
+// --- Rede Wi‑Fi ---
+#define WIFI_SSID               "SEU_SSID"              // Nome da rede Wi-Fi (substituir)
+#define WIFI_PASS               "SUA_SENHA"             // Senha da rede Wi-Fi
+#define UDP_TARGET_IP           "192.168.0.100"         // IP do dispositivo Flutter (receptor)
+#define UDP_TARGET_PORT         54321                   // Porta UDP no destino
+
 void app_main() {
     printf("Iniciando o MicroDetection...\n");
 }
