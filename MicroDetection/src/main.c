@@ -251,6 +251,93 @@ static void i2s_capturer_deinit(I2SAudioCapturer *capt) {
     }
 }
 
+// ======================= PROCESSADOR DE ÁUDIO =============================
+#define FILTER_ORDER 2               // Ordem do filtro IIR (2ª ordem -> 2 polos/zeros)
+
+/*
+ * Estrutura que mantém os coeficientes e o estado do filtro.
+ */
+typedef struct {
+    float b[FILTER_ORDER + 1];       // Coeficientes do numerador (b0, b1, b2)
+    float a[FILTER_ORDER + 1];       // Coeficientes do denominador (a0, a1, a2) (a0 sempre 1)
+    float x_delay[FILTER_ORDER + 1]; // Atrasos das amostras de entrada [x[n-1], x[n-2]]
+    float y_delay[FILTER_ORDER + 1]; // Atrasos das amostras de saída   [y[n-1], y[n-2]]
+} AudioProcessor;
+
+/**
+ * @brief Inicializa o processador com coeficientes placeholder.
+ * ATENÇÃO: Estes coeficientes são apenas ilustrativos.
+ * Em produção, será substituído por coeficientes reais projetados para o filtro passa‑banda de 80-2000 Hz.
+ */
+static void audio_processor_init(AudioProcessor *proc) {
+    // Coeficientes placeholder (não funcionais para filtro PB real)
+    proc->b[0] = 0.1f;  proc->b[1] = -0.1f; proc->b[2] = 0.0f;
+    proc->a[0] = 1.0f;  proc->a[1] = -0.5f;  proc->a[2] = 0.0f;
+
+    // Zera os buffers de estado (garante condição inicial nula)
+    memset(proc->x_delay, 0, sizeof(proc->x_delay));
+    memset(proc->y_delay, 0, sizeof(proc->y_delay));
+
+    // Log de aviso (visível no monitor serial)
+    ESP_LOGW("AudioProc", "Usando coeficientes placeholder – substitua pelos reais!");
+}
+
+/**
+ * @brief Aplica o filtro PB, normalização e calcula a energia média do quadro.
+ * @param proc Ponteiro para o processador.
+ * @param input Amostras de entrada (int16_t).
+ * @param output Buffer de saída (pode ser o mesmo que input, para processamento in-place).
+ * @param num_samples Número de amostras a processar.
+ * @return Energia média do quadro processado.
+ */
+static float audio_processor_process(AudioProcessor *proc,
+                                     const int16_t *input,
+                                     int16_t *output,
+                                     size_t num_samples) {
+    float energy = 0.0f;            // Acumulador da energia (soma dos quadrados)
+    int16_t max_val = 0;            // Valor absoluto máximo (para possível normalização)
+
+    // Itera sobre cada amostra do bloco
+    for (size_t i = 0; i < num_samples; i++) {
+        // Converte amostra de 16 bits para float no intervalo [-1.0, 1.0)
+        float xn = input[i] / 32768.0f;
+
+        // --- Filtro IIR de 2ª ordem (forma direta I) ---
+        // yn = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+        float yn = proc->b[0] * xn
+                 + proc->b[1] * proc->x_delay[0]
+                 + proc->b[2] * proc->x_delay[1]
+                 - proc->a[1] * proc->y_delay[0]
+                 - proc->a[2] * proc->y_delay[1];
+
+        // Atualiza os buffers de atraso (shift register)
+        proc->x_delay[1] = proc->x_delay[0];    // x[n-2] = x[n-1]
+        proc->x_delay[0] = xn;                  // x[n-1] = x[n]
+        proc->y_delay[1] = proc->y_delay[0];    // y[n-2] = y[n-1]
+        proc->y_delay[0] = yn;                  // y[n-1] = y[n]
+
+        // Converte o resultado float de volta para inteiro de 16 bits
+        int16_t y_int = (int16_t)(yn * 32767.0f);
+
+        // Se um buffer de saída foi fornecido, escreve a amostra processada
+        if (output) {
+            output[i] = y_int;
+        } else {
+            // Se output é NULL, usa a amostra original (fallback)
+            y_int = input[i];
+        }
+
+        // Atualiza o máximo absoluto encontrado (para possível normalização de nível)
+        if (abs(y_int) > abs(max_val)) max_val = y_int;
+
+        // Acumula o quadrado da amostra para o cálculo da energia
+        energy += (float)y_int * (float)y_int;
+    }
+
+    // Calcula a energia média do quadro (soma dos quadrados dividida pelo número de amostras)
+    energy /= (float)num_samples;
+    return energy;                  // Retorna a energia média
+}
 
 void app_main(void) {
      // --- Configura UART ---
