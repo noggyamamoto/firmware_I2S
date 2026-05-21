@@ -474,6 +474,140 @@ static void udp_transmitter_deinit(UdpTransmitter *trans) {
     esp_wifi_deinit();                                  // Desinicializa o subsistema Wi-Fi
 }
 
+// ======================= TAREFAS DO FREERTOS ==============================
+
+/**
+ * @brief Tarefa produtora (Core 1): lê I2S, processa, empacota e insere no buffer circular.
+ */
+static void audio_producer_task(void *pvParameters) {
+    (void)pvParameters;                         // Parâmetro não utilizado (evita warning)
+    AudioFrame frame;                           // Frame local a ser preenchido
+    int16_t raw_samples[BLOCK_SAMPLES];         // Buffer para amostras brutas do I2S
+
+    while (1) {                                 // Loop infinito da tarefa
+        if (!g_running) {                       // Se não está em captura,
+            vTaskDelay(pdMS_TO_TICKS(50));      // aguarda 50 ms e verifica novamente
+            continue;
+        }
+
+        // Leitura de um bloco de amostras do microfone
+        size_t bytes_read = i2s_capturer_read(&g_capturer, raw_samples, BLOCK_SAMPLES);
+        if (bytes_read != BLOCK_BYTES) {        // Se a leitura não retornou o esperado,
+            ESP_LOGW("producer", "Leitura I2S incompleta: %d bytes", bytes_read);
+            continue;                           // ignora esse bloco (possível glitch)
+        }
+
+        // Processa o áudio (filtro, normalização) e obtém a energia do quadro
+        float energy = audio_processor_process(&g_processor, raw_samples,
+                                               frame.samples, BLOCK_SAMPLES);
+
+        // Preenche o cabeçalho com timestamp, sequência, etc.
+        uint64_t now_us = esp_timer_get_time();                 // Tempo atual em µs
+        frame.header.timestamp_ms = (uint32_t)((now_us - g_start_time_us) / 1000);
+        frame.header.sequence_number = g_sequence++;            // Incrementa sequência
+        frame.header.num_samples = BLOCK_SAMPLES;               // Fixo: 1024
+        frame.header.energy = energy;                           // Energia do quadro
+
+        // Tenta inserir no buffer circular (re-tenta se estiver cheio)
+        while (!circ_buffer_push(&g_frame_buffer, &frame)) {
+            vTaskDelay(pdMS_TO_TICKS(5));       // Aguarda 5 ms antes de tentar de novo
+        }
+    }
+}
+
+/**
+ * @brief Tarefa consumidora (Core 0): retira frames do buffer e os envia via UDP.
+ */
+static void network_consumer_task(void *pvParameters) {
+    (void)pvParameters;                         // Parâmetro não utilizado
+    AudioFrame frame;                           // Frame recebido do buffer
+
+    while (1) {
+        // Tenta obter um frame do buffer circular
+        if (circ_buffer_pop(&g_frame_buffer, &frame)) {
+            // Envia o frame como datagrama UDP
+            if (!udp_transmitter_send(&g_transmitter, &frame, sizeof(AudioFrame))) {
+                ESP_LOGE("consumer", "Falha no envio UDP"); // Log de erro se falhar
+            }
+        } else {
+            // Se o buffer estava vazio, dorme 10 ms para não sobrecarregar a CPU
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        // Se foi solicitada a parada e o buffer está vazio, encerra a tarefa
+        if (g_stop_request && circ_buffer_count(&g_frame_buffer) == 0) {
+            ESP_LOGI("consumer", "Buffer vazio, tarefa consumidora encerrada.");
+            break;                              // Sai do loop infinito
+        }
+    }
+    vTaskDelete(NULL);                          // Remove a própria tarefa
+}
+
+/**
+ * @brief Tarefa de interface do usuário (menu serial).
+ */
+static void ui_task(void *pvParameters) {
+    (void)pvParameters;
+    vTaskDelay(pdMS_TO_TICKS(2000));            // Aguarda 2 segundos para Wi-Fi estabilizar
+    uart_printf("\n*** Sistema Iniciado ***\n");
+
+    while (1) {
+        print_menu();                           // Exibe as opções
+        char input[8] = {0};                    // Buffer para a entrada do usuário
+        int len = 0;
+
+        // Lê caracteres até pressionar ENTER ou timeout de 1 s por caractere
+        while (len < (int)(sizeof(input) - 1)) {
+            uint8_t c;
+            int rd = uart_read_bytes(UART_PORT, &c, 1, pdMS_TO_TICKS(1000));
+            if (rd <= 0) break;                 // Timeout: sai do loop de leitura
+            if (c == '\r' || c == '\n') {       // Se for ENTER
+                uart_printf("\n");              // Ecoa quebra de linha
+                break;
+            }
+            uart_write_bytes(UART_PORT, (const char*)&c, 1); // Ecoa o caractere
+            input[len++] = (char)c;
+        }
+        input[len] = '\0';                      // Finaliza a string
+
+        int op = atoi(input);                   // Converte para inteiro
+        switch (op) {
+            case 1:
+                if (!g_running) {
+                    g_start_time_us = esp_timer_get_time();  // Marca tempo de início
+                    g_sequence = 0;                         // Reinicia sequência
+                    g_running = true;                       // Ativa captura
+                    g_stop_request = false;
+                    i2s_capturer_start(&g_capturer);        // Liga I2S
+                    uart_printf("Captura INICIADA.\n");
+                } else {
+                    uart_printf("Captura já está ativa.\n");
+                }
+                break;
+            case 2:
+                if (g_running) {
+                    g_running = false;                      // Desativa captura
+                    g_stop_request = true;                  // Sinaliza parada
+                    i2s_capturer_stop(&g_capturer);         // Desliga I2S
+                    vTaskDelay(pdMS_TO_TICKS(500));         // Aguarda consumidora esvaziar
+                    uart_printf("Captura PARADA.\n");
+                } else {
+                    uart_printf("Nenhuma captura em andamento.\n");
+                }
+                break;
+            case 3:
+                uart_printf("Status: %s\n", g_running ? "ATIVO" : "PARADO");
+                uart_printf("Pacotes enviados: %" PRIu32 "\n", g_sequence);
+                uart_printf("Frames no buffer: %d\n", circ_buffer_count(&g_frame_buffer));
+                break;
+            case 0:
+                break;
+            default:
+                uart_printf("Opção inválida.\n");
+        }
+    }
+}
+
 void app_main(void) {
      // --- Configura UART ---
     uart_config_t uart_cfg = {
