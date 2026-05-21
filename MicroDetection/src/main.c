@@ -68,6 +68,19 @@
 #define UDP_TARGET_IP           "192.168.0.100"     // IP do dispositivo Flutter (receptor)
 #define UDP_TARGET_PORT         54321               // Porta UDP no destino
 
+// ======================= OBJETOS GLOBAIS ==================================
+// Instâncias estáticas dos módulos (alocadas na BSS/data)
+static I2SAudioCapturer g_capturer;                     // Capturador I2S
+static AudioProcessor    g_processor;                   // Processador de áudio
+static UdpTransmitter    g_transmitter;                 // Transmissor UDP
+static CircularBuffer    g_frame_buffer;                // Buffer circular de frames
+
+// Variáveis de controle de estado (voláteis pois são acessadas por múltiplas tarefas)
+static volatile bool g_running = false;                 // Indica se a captura está ativa
+static volatile bool g_stop_request = false;            // Sinaliza pedido de parada
+static uint32_t g_sequence = 0;                         // Contador de sequência de frames
+static uint64_t g_start_time_us = 0;                    // Tempo de início da captura (microssegundos)
+
 // ======================= ESTRUTURAS DE DADOS ==============================
 /*
  * Cabeçalho do frame de áudio enviado via UDP.
@@ -450,5 +463,5 @@ void app_main(void) {
     uart_driver_install(UART_PORT, UART_RX_BUF_SIZE,       // Instala o driver UART
                         UART_TX_BUF_SIZE, 0, NULL, 0);
     
-    
+
 }
