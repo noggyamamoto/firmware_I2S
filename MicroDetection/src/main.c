@@ -90,7 +90,108 @@ typedef struct {
     int16_t samples[BLOCK_SAMPLES];             // 1024 amostras de 16 bits (2048 bytes)
 } AudioFrame;                                   // Total: 2064 bytes por frame
 
+// ======================= Buffer Circular para AudioFrame ================
+#define CIRC_BUFFER_CAPACITY 4              // Capacidade máxima (nº de AudioFrames no buffer)
 
-void app_main() {
-    printf("Iniciando o MicroDetection...\n");
+/*
+ * Estrutura que implementa um buffer circular sincronizado.
+ * Possui um array de tamanho fixo e índices de leitura/escrita.
+ */
+typedef struct {
+    AudioFrame buffer[CIRC_BUFFER_CAPACITY]; // Array estático com até 4 frames
+    int head;                               // Índice da próxima posição de leitura (consumidor)
+    int tail;                               // Índice da próxima posição de escrita (produtor)
+    int count;                              // Número atual de elementos no buffer
+    SemaphoreHandle_t mutex;                // Mutex para acesso concorrente seguro
+} CircularBuffer;
+
+/**
+ * @brief Inicializa o buffer circular criando o mutex e zerando índices.
+ * @param cb Ponteiro para a estrutura CircularBuffer.
+ */
+static void circ_buffer_init(CircularBuffer *cb) {
+    cb->head = 0;                                           // Inicia leitura no índice 0
+    cb->tail = 0;                                           // Inicia escrita no índice 0
+    cb->count = 0;                                          // Nenhum elemento armazenado
+    cb->mutex = xSemaphoreCreateMutex();                    // Cria o mutex do FreeRTOS
+    if (cb->mutex == NULL) {                                // Verifica se a criação falhou
+        ESP_LOGE("CircBuffer", "Falha ao criar mutex");     // Log de erro crítico
+        abort();                                            // Aborta execução (crítico)
+    }
+}
+
+/**
+ * @brief Tenta inserir um frame no buffer. Retorna true se bem-sucedido.
+ * @param cb Ponteiro para o buffer.
+ * @param frame Ponteiro para o AudioFrame a ser copiado.
+ * @return true se o frame foi inserido; false se o buffer está cheio.
+ */
+static bool circ_buffer_push(CircularBuffer *cb, const AudioFrame *frame) {
+    // Obtém o mutex (bloqueante) para acesso exclusivo
+    if (xSemaphoreTake(cb->mutex, portMAX_DELAY) != pdTRUE)
+        return false;                                       // Retorna falso se não conseguiu o mutex
+    if (cb->count >= CIRC_BUFFER_CAPACITY) {                // Verifica se buffer está cheio
+        xSemaphoreGive(cb->mutex);                          // Libera o mutex
+        return false;                                       // Não foi possível inserir
+    }
+    cb->buffer[cb->tail] = *frame;                          // Copia o frame para a posição de escrita
+    cb->tail = (cb->tail + 1) % CIRC_BUFFER_CAPACITY;       // Avança o índice de escrita (circular)
+    cb->count++;                                            // Incrementa o contador de elementos
+    xSemaphoreGive(cb->mutex);                              // Libera o mutex
+    return true;                                            // Sucesso
+}
+
+/**
+ * @brief Remove e obtém um frame do buffer.
+ * @param cb Ponteiro para o buffer.
+ * @param out Ponteiro onde o frame removido será armazenado.
+ * @return true se havia um frame disponível; false se o buffer estava vazio.
+ */
+static bool circ_buffer_pop(CircularBuffer *cb, AudioFrame *out) {
+    // Obtém o mutex (bloqueante)
+    if (xSemaphoreTake(cb->mutex, portMAX_DELAY) != pdTRUE)
+        return false;                                       // Falha ao obter mutex
+    if (cb->count == 0) {                                   // Buffer vazio?
+        xSemaphoreGive(cb->mutex);                          // Libera mutex
+        return false;                                       // Nada a remover
+    }
+    *out = cb->buffer[cb->head];                            // Copia o frame da posição de leitura
+    cb->head = (cb->head + 1) % CIRC_BUFFER_CAPACITY;       // Avança índice de leitura (circular)
+    cb->count--;                                            // Decrementa contador
+    xSemaphoreGive(cb->mutex);                              // Libera mutex
+    return true;                                            // Sucesso
+}
+
+/**
+ * @brief Retorna o número de elementos atualmente no buffer para debug.
+ * @return Quantidade de elementos.
+ */
+static int circ_buffer_count(CircularBuffer *cb) {
+    return cb->count;                                       // Retorna o contador interno
+}
+
+
+void app_main(void) {
+     // --- Configura UART ---
+    uart_config_t uart_cfg = {
+        .baud_rate = UART_BAUDRATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB,
+    };
+    uart_param_config(UART_PORT, &uart_cfg);              // Aplica as configurações
+    uart_set_pin(UART_PORT, UART_TXD_PIN, UART_RXD_PIN,   // Define os pinos TX e RX
+                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE); // RTS e CTS não usados
+    uart_driver_install(UART_PORT, UART_RX_BUF_SIZE,       // Instala o driver UART
+                        UART_TX_BUF_SIZE, 0, NULL, 0);
+
+    
+
+
+
+
+
+
 }
