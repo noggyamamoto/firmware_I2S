@@ -385,12 +385,12 @@ static bool udp_transmitter_connect(UdpTransmitter *trans,
 
     // Obtém o handle da interface de rede padrão da estação
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    esp_ip4_addr_t ip;
-    // Aguarda até que um IP seja obtido (bloqueante, mas simples para MVP)
-    while (esp_netif_get_ip_info(netif, &ip) != ESP_OK) {
-        vTaskDelay(pdMS_TO_TICKS(500));          // Aguarda 500 ms e tenta novamente
+    esp_netif_ip_info_t ip_info;
+    while (esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
-    ESP_LOGI("UdpTrans", "Wi‑Fi conectado, IP: " IPSTR, IP2STR(&ip));
+    // Ip_info.ip é o endereço IP
+    ESP_LOGI("UdpTrans", "Wi‑Fi conectado, IP: " IPSTR, IP2STR(&ip_info.ip));
 
     // Cria um socket UDP (AF_INET = IPv4, SOCK_DGRAM = datagrama)
     trans->sock = socket(AF_INET, SOCK_DGRAM, 0);
