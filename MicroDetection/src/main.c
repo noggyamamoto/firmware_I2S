@@ -624,5 +624,30 @@ void app_main(void) {
     uart_driver_install(UART_PORT, UART_RX_BUF_SIZE,       // Instala o driver UART
                         UART_TX_BUF_SIZE, 0, NULL, 0);
     
+    // --- Inicializa os módulos ---
+    if (!i2s_capturer_init(&g_capturer)) {                 // Inicializa I2S
+        uart_printf("FATAL: Falha ao inicializar I2S.\n");
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));         // Trava em erro
+    }
 
+    audio_processor_init(&g_processor);                    // Inicializa processador
+
+    if (!udp_transmitter_connect(&g_transmitter,            // Conecta Wi-Fi e socket
+                                 WIFI_SSID, WIFI_PASS)) {
+        uart_printf("FATAL: Falha na conexão Wi‑Fi.\n");
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    circ_buffer_init(&g_frame_buffer);                     // Inicializa buffer circular
+
+    // --- Cria as tarefas ---
+    // UI: núcleo 0, prioridade 1
+    xTaskCreatePinnedToCore(ui_task, "ui_task", 4096, NULL, 1, NULL, 0);
+    // Consumidora: núcleo 0, prioridade 2
+    xTaskCreatePinnedToCore(network_consumer_task, "net_consumer", 4096, NULL, 2, NULL, 0);
+    // Produtora: núcleo 1, prioridade 3 (mais alta para não perder amostras)
+    xTaskCreatePinnedToCore(audio_producer_task, "audio_prod", 8192, NULL, 3, NULL, 1);
+
+    // A função main termina, mas as tarefas continuam executando
+    vTaskDelete(NULL);
 }
