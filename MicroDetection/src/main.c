@@ -243,13 +243,13 @@ static size_t i2s_capturer_read(I2SAudioCapturer *capt, int16_t *buffer, size_t 
 
 /**
  * @brief Libera os recursos do capturador I2S (desabilita canal e deleta handle).
- */
-static void i2s_capturer_deinit(I2SAudioCapturer *capt) {
+ 
+static void i2s_capturer_deinit(I2SAudioCapturer *capt) {    // Não implementado ainda
     if (capt->rx_handle) {                                   // Verifica se o handle é válido
         i2s_channel_disable(capt->rx_handle);               // Desabilita o canal
         i2s_del_channel(capt->rx_handle);                   // Deleta o canal, liberando recursos
     }
-}
+}*/
 
 // ======================= PROCESSADOR DE ÁUDIO =============================
 #define FILTER_ORDER 2               // Ordem do filtro IIR (2ª ordem -> 2 polos/zeros)
@@ -424,15 +424,15 @@ static bool udp_transmitter_send(UdpTransmitter *trans, const void *data, size_t
 
 /**
  * @brief Libera os recursos do transmissor (fecha socket e desliga Wi-Fi).
- */
-static void udp_transmitter_deinit(UdpTransmitter *trans) {
+ 
+static void udp_transmitter_deinit(UdpTransmitter *trans) {  // Não implementado ainda
     if (trans->sock >= 0) {
         close(trans->sock);                             // Fecha o socket
         trans->sock = -1;
     }
     esp_wifi_stop();                                    // Para o Wi-Fi
     esp_wifi_deinit();                                  // Desinicializa o subsistema Wi-Fi
-}
+}*/
 
 // ======================= OBJETOS GLOBAIS ==================================
 // Instâncias estáticas dos módulos (alocadas na BSS/data)
