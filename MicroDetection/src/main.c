@@ -63,10 +63,33 @@
 #define BLOCK_BYTES             (BLOCK_SAMPLES * sizeof(int16_t)) // Tamanho do bloco em bytes
 
 // --- Rede Wi‑Fi ---
-#define WIFI_SSID               "SEU_SSID"              // Nome da rede Wi-Fi (substituir)
-#define WIFI_PASS               "SUA_SENHA"             // Senha da rede Wi-Fi
-#define UDP_TARGET_IP           "192.168.0.100"         // IP do dispositivo Flutter (receptor)
-#define UDP_TARGET_PORT         54321                   // Porta UDP no destino
+#define WIFI_SSID               "SSID"              // Nome da rede Wi-Fi (substituir)
+#define WIFI_PASS               "SENHA"             // Senha da rede Wi-Fi
+#define UDP_TARGET_IP           "192.168.0.100"     // IP do dispositivo Flutter (receptor)
+#define UDP_TARGET_PORT         54321               // Porta UDP no destino
+
+// ======================= ESTRUTURAS DE DADOS ==============================
+/*
+ * Cabeçalho do frame de áudio enviado via UDP.
+ * Atributo packed garante que não haja padding entre os campos.
+ */
+#pragma pack(push, 1)           // Salva o alinhamento atual e define empacotamento byte a byte
+typedef struct {
+    uint32_t timestamp_ms;      // Timestamp desde o início da captura (em milissegundos)
+    uint32_t sequence_number;   // Número sequencial do pacote (para detecção de perdas)
+    uint32_t num_samples;       // Quantidade de amostras de áudio contidas neste frame
+    float    energy;            // Energia média do quadro (útil para detecção de onset)
+} AudioFrameHeader;             // Total: 16 bytes (4+4+4+4)
+#pragma pack(pop)               // Restaura o alinhamento anterior
+
+/*
+ * Estrutura que agrupa cabeçalho + dados de áudio.
+ */
+typedef struct {
+    AudioFrameHeader header;                    // Cabeçalho de 16 bytes
+    int16_t samples[BLOCK_SAMPLES];             // 1024 amostras de 16 bits (2048 bytes)
+} AudioFrame;                                   // Total: 2064 bytes por frame
+
 
 void app_main() {
     printf("Iniciando o MicroDetection...\n");
