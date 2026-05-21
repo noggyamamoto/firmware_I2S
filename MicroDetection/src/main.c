@@ -339,6 +339,101 @@ static float audio_processor_process(AudioProcessor *proc,
     return energy;                  // Retorna a energia média
 }
 
+// ======================= TRANSMISSOR UDP ==================================
+/*
+ * Estrutura que mantém o socket UDP e o endereço de destino.
+ */
+typedef struct {
+    int sock;                           // Descritor do socket UDP
+    struct sockaddr_in dest_addr;       // Endereço IP/porta do destinatário
+} UdpTransmitter;
+
+/**
+ * @brief Conecta-se ao Wi-Fi e cria um socket UDP para o destino configurado.
+ * @param trans Ponteiro para a estrutura do transmissor.
+ * @param ssid Nome da rede Wi-Fi.
+ * @param pass Senha da rede.
+ * @return true se a conexão e criação do socket foram bem-sucedidas.
+ */
+static bool udp_transmitter_connect(UdpTransmitter *trans,
+                                    const char *ssid, const char *pass) {
+    // Inicializa o NVS (necessário para armazenar configurações Wi-Fi)
+    ESP_ERROR_CHECK(nvs_flash_init());
+    // Inicializa a interface de rede (TCP/IP)
+    ESP_ERROR_CHECK(esp_netif_init());
+    // Cria o loop de eventos padrão (necessário para Wi-Fi)
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Inicializa o subsistema Wi-Fi com configuração padrão
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // Cria a interface de rede padrão para estação (STA)
+    esp_netif_create_default_wifi_sta();
+
+    // Preenche a estrutura de configuração do Wi-Fi
+    wifi_config_t wifi_cfg = {0};
+    strncpy((char*)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
+    strncpy((char*)wifi_cfg.sta.password, pass, sizeof(wifi_cfg.sta.password) - 1);
+
+    // Define o modo como Estação (STA)
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    // Aplica a configuração (SSID e senha)
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_cfg));
+    // Inicia o Wi-Fi (tentará conectar)
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Obtém o handle da interface de rede padrão da estação
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_ip4_addr_t ip;
+    // Aguarda até que um IP seja obtido (bloqueante, mas simples para MVP)
+    while (esp_netif_get_ip_info(netif, &ip) != ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(500));          // Aguarda 500 ms e tenta novamente
+    }
+    ESP_LOGI("UdpTrans", "Wi‑Fi conectado, IP: " IPSTR, IP2STR(&ip));
+
+    // Cria um socket UDP (AF_INET = IPv4, SOCK_DGRAM = datagrama)
+    trans->sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (trans->sock < 0) {
+        ESP_LOGE("UdpTrans", "Falha ao criar socket");
+        return false;                                   // Falha crítica
+    }
+
+    // Configura o endereço de destino
+    trans->dest_addr.sin_family = AF_INET;              // Família IPv4
+    trans->dest_addr.sin_port = htons(UDP_TARGET_PORT); // Porta do destino (network byte order)
+    // Converte o IP textual para binário e armazena em dest_addr.sin_addr
+    inet_pton(AF_INET, UDP_TARGET_IP, &trans->dest_addr.sin_addr);
+    return true;
+}
+
+/**
+ * @brief Envia um buffer de dados via UDP.
+ * @param trans Ponteiro para o transmissor.
+ * @param data Ponteiro para os dados a enviar.
+ * @param len Tamanho dos dados em bytes.
+ * @return true se enviou com sucesso o número esperado de bytes.
+ */
+static bool udp_transmitter_send(UdpTransmitter *trans, const void *data, size_t len) {
+    if (trans->sock < 0) return false;                  // Socket inválido
+    // Envia o datagrama UDP
+    int sent = sendto(trans->sock, data, len, 0,
+                      (struct sockaddr*)&trans->dest_addr, sizeof(trans->dest_addr));
+    return (sent == (int)len);                          // Sucesso se enviou todos os bytes
+}
+
+/**
+ * @brief Libera os recursos do transmissor (fecha socket e desliga Wi-Fi).
+ */
+static void udp_transmitter_deinit(UdpTransmitter *trans) {
+    if (trans->sock >= 0) {
+        close(trans->sock);                             // Fecha o socket
+        trans->sock = -1;
+    }
+    esp_wifi_stop();                                    // Para o Wi-Fi
+    esp_wifi_deinit();                                  // Desinicializa o subsistema Wi-Fi
+}
+
 void app_main(void) {
      // --- Configura UART ---
     uart_config_t uart_cfg = {
