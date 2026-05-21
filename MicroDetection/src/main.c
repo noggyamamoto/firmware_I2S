@@ -81,6 +81,33 @@ static volatile bool g_stop_request = false;            // Sinaliza pedido de pa
 static uint32_t g_sequence = 0;                         // Contador de sequência de frames
 static uint64_t g_start_time_us = 0;                    // Tempo de início da captura (microssegundos)
 
+// ======================= FUNÇÕES UART AUXILIARES ==========================
+/**
+ * @brief Função printf-like que envia a string formatada pela UART.
+ * @param format String de formato (similar ao printf).
+ * @param ... Argumentos variáveis.
+ */
+static void uart_printf(const char *format, ...) {
+    char buf[256];                                      // Buffer para montar a string
+    va_list args;
+    va_start(args, format);                             // Inicia a lista de argumentos
+    vsnprintf(buf, sizeof(buf), format, args);          // Formata a string
+    va_end(args);                                       // Finaliza a lista
+    uart_write_bytes(UART_PORT, buf, strlen(buf));      // Envia pela UART
+}
+
+/**
+ * @brief Exibe o menu de opções no terminal serial.
+ */
+static void print_menu(void) {
+    uart_printf("\n===== MENU MVP TRANSCRIÇÃO MUSICAL =====\n");
+    uart_printf("1 - Iniciar captura e transmissão\n");
+    uart_printf("2 - Parar captura\n");
+    uart_printf("3 - Status\n");
+    uart_printf("0 - Repetir menu\n");
+    uart_printf("Escolha: ");
+}
+
 // ======================= ESTRUTURAS DE DADOS ==============================
 /*
  * Cabeçalho do frame de áudio enviado via UDP.
