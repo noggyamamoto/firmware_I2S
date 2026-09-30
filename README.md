@@ -1,14 +1,136 @@
 # firmware_I2S
 
-Projeto embarcado para **aquisição de áudio em tempo real via I2S**, com **double buffer circular** e **envio via Wi-Fi (UDP)** para um aplicativo Flutter responsável pelo processamento musical e geração de partitura.
+Firmware do dispositivo embarcado do TCC **Sistema de Processamento de Áudio com Feedback em Tempo Real Aplicado ao Ensino de Partitura**.
+
+O dispositivo capta o som do teclado com o **microfone digital INMP441 (I2S)**, identifica as notas tocadas (altura e duração) e envia os eventos via **Wi-Fi (UDP)** para o [aplicativo Flutter](https://github.com/noggyamamoto/Flutter_App), que compara a execução com a partitura MusicXML. Também executa o metrônomo sonoro (buzzer) e visual (LED RGB).
 
 ## Stack
 
 - **C**
-- **ESP-IDF**
+- **ESP-IDF 5.x** (FreeRTOS, driver I2S `i2s_std`, LEDC, esp_timer, NVS, lwIP)
 - **PlatformIO**
 
-## Projeto do Sistema para Geração Automática de Partitura Musical (TCC)
+## Funcionalidades (requisitos do TCC)
+
+| Requisito | Implementação |
+|---|---|
+| RFE01 – Verificação de rede | Varredura das redes, conexão com novas tentativas, rede própria de reserva (modo AP) e LED de status |
+| RFE02 – Metrônomo sonoro | Buzzer passivo (LEDC), clique acentuado no tempo forte |
+| RFE03 – Metrônomo visual | LED RGB: azul (binário), verde (ternário), roxo (quaternário), amarelo na contagem |
+| RFE04 – Captação digital e filtragem | INMP441 via I2S (24 bits em slots de 32 bits, 16 kHz) + passa-banda 70 Hz–2,5 kHz |
+| RFE05 – Processamento digital de sinais | Altura pelo algoritmo **YIN** + segmentação em notas (ataque, soltura, duração) |
+| RFE06 – Transmissão | Eventos `NOTE_ON`/`NOTE_OFF` em pacotes UDP binários com sequência e timestamp |
+| RNFE01 – Baixa latência | Janelas de 16 ms; tempo de processamento exibido no menu serial (opção 3) |
+| RNFE03 – Imunidade a ruído | Filtro passa-banda + piso de ruído adaptativo + limiar mínimo |
+| RNFE04 – Tolerância temporal | Quantização dos tempos em 10 ms |
+
+## Hardware
+
+| INMP441 | ESP32 DevKit V1 | ESP32-S3 N16R8 |
+|---|---|---|
+| VDD | 3V3 | 3V3 |
+| GND | GND | GND |
+| L/R | GND | GND |
+| SCK | GPIO26 | GPIO5 |
+| WS | GPIO25 | GPIO6 |
+| SD | GPIO33 | GPIO4 |
+
+| Indicador | ESP32 DevKit V1 | ESP32-S3 N16R8 |
+|---|---|---|
+| LED de status (+ resistor 220 Ω) | GPIO2 (LED on-board) | GPIO2 |
+| LED RGB catodo comum (R/G/B, resistores 220 Ω) | GPIO27 / 14 / 13 | GPIO15 / 16 / 17 |
+| Buzzer passivo (via transistor) | GPIO18 | GPIO18 |
+
+Os pinos ficam em `MicroDetection/src/config.h` (para LED RGB de anodo comum, use `RGB_LED_COMMON_ANODE 1`).
+
+**LED de status:** piscando rápido = conectando ao Wi-Fi · duas piscadas = rede própria ativa · piscando lento = Wi-Fi conectado, aguardando o app · aceso = app pareado.
+
+## Compilar e gravar
+
+```bash
+cd MicroDetection
+pio run -e esp32doit-devkit-v1 -t upload      # ESP32 DevKit V1
+pio run -e esp32-s3-devkitc-1 -t upload       # ESP32-S3 N16R8
+pio device monitor
+```
+
+### Wi-Fi
+
+Na primeira execução não há rede configurada: o dispositivo cria a rede **PartituraIoT-XXXX** (senha `partitura123`). Para usar a rede da escola/casa, abra o monitor serial e escolha a opção **5 – Configurar rede Wi-Fi**; as credenciais ficam salvas na NVS. O app precisa estar na mesma rede que o dispositivo.
+
+### Menu serial (115200 bps)
+
+```
+1 - Iniciar captura local (teste sem o app)
+2 - Parar captura
+3 - Status
+4 - Escanear redes Wi-Fi
+5 - Configurar rede Wi-Fi
+6 - Liga/desliga envio de áudio bruto (diagnóstico)
+7 - Testar metrônomo (2 compassos)
+8 - Afinador (5 s de leitura contínua)
+9 - Reiniciar dispositivo
+```
+
+## Arquitetura do firmware
+
+```
+I2S (INMP441) ─DMA─► audio_prod (núcleo 1, prio 5)
+                      │ passa-banda → janela 1024 → YIN → segmentação
+                      ▼
+                 fila de eventos ──► net_tx (núcleo 0) ──UDP──► app
+                                           ▲
+          metrônomo (esp_timer) ─ batidas ─┘
+app ──UDP──► net_rx (núcleo 0): DISCOVER, CONNECT, PING, SESSION_START/STOP, SET_TEMPO
+```
+
+| Arquivo | Função |
+|---|---|
+| `main.c` | Inicialização e criação das tarefas |
+| `config.h` | Pinos, parâmetros de áudio, DSP e rede |
+| `protocol.h` | Formato binário dos pacotes UDP (espelhado no app) |
+| `audio_capture.c` | Driver I2S do INMP441 |
+| `dsp.c` | Passa-banda (biquads RBJ) e detector de altura YIN |
+| `note_tracker.c` | Ataque/soltura, piso de ruído, reataque, legato, quantização |
+| `audio_pipeline.c` | Tarefa de áudio: captura → DSP → eventos |
+| `udp_link.c` | Recepção de comandos e envio de eventos |
+| `metronome.c` | Metrônomo sonoro/visual com contagem de entrada |
+| `wifi_manager.c` | Varredura, conexão, novas tentativas e modo AP |
+| `indicators.c` | LED de status, LED RGB e buzzer |
+| `settings.c` | Credenciais na NVS |
+| `serial_ui.c` | Menu serial e diagnóstico |
+| `circular_buffer.c` | Buffer circular de quadros brutos (modo diagnóstico) |
+
+## Protocolo UDP
+
+Todos os pacotes começam com um cabeçalho de 12 bytes (little-endian): `magic 0x5443 | versão | tipo | sequência | timestamp_ms`. O dispositivo escuta na porta **54322** e responde ao endereço de origem do app. Detalhes em [`src/protocol.h`](MicroDetection/src/protocol.h).
+
+| App → dispositivo | Dispositivo → app |
+|---|---|
+| `DISCOVER` (broadcast) | `ANNOUNCE` (nome, firmware, MAC, RSSI) |
+| `CONNECT` | `CONNECT_ACK` |
+| `PING` (1 s) | `PONG` (estado, RSSI, ruído) |
+| `SESSION_START` (BPM, compasso, contagem) | `BEAT` (a cada tempo) |
+| `SET_TEMPO`, `CONFIG`, `SESSION_STOP`, `DISCONNECT` | `NOTE_ON` / `NOTE_OFF` (MIDI, Hz, duração) |
+
+O tempo 0 da sessão é o início da contagem de entrada; a música começa após 2 compassos.
+
+## Testes no computador
+
+O DSP (filtro, YIN e segmentação) não depende do ESP-IDF e é testado com sinais sintéticos de teclado, com ruído de sala e cliques do metrônomo:
+
+```bash
+make -C MicroDetection/test/host          # testes do pipeline de DSP
+make -C MicroDetection/test/host fake_device
+./MicroDetection/test/host/fake_device    # dispositivo falso para testar o app sem hardware
+```
+
+---
+
+## Documento de concepção (versão inicial do projeto)
+
+> A seção abaixo registra a concepção inicial. Na implementação atual, a detecção de notas é feita no próprio ESP32 (requisito RFE05 do TCC) e o app recebe apenas os eventos de nota.
+
 
 ## 1. Visão Geral e Objetivos
 
