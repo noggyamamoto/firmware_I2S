@@ -10,5 +10,9 @@ test_pipeline: test_pipeline.c $(SRC)
 run: test_pipeline
 	./test_pipeline
 
+# Dispositivo falso (UDP) para testar o app sem hardware
+fake_device: fake_device.c ../../src/protocol.h
+	$(CC) -std=gnu11 -O2 -Wall -Wextra -o $@ fake_device.c
+
 clean:
-	rm -f test_pipeline
+	rm -f test_pipeline fake_device

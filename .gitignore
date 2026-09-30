@@ -54,3 +54,4 @@ dkms.conf
 # debug information files
 *.dwo
 MicroDetection/test/host/test_pipeline
+MicroDetection/test/host/fake_device
