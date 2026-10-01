@@ -14,8 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../src/dsp.h"
-#include "../../src/note_tracker.h"
+#include "dsp.h"
+#include "note_tracker.h"
 
 #define FS       16000
 #define HOP      256

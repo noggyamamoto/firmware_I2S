@@ -3,3 +3,15 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Compilação direta com o ESP-IDF (idf.py)
+build/
+build-*/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Testes no computador
+test/host/test_pipeline
+test/host/fake_device
