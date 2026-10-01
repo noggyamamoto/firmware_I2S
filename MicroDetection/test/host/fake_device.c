@@ -21,7 +21,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "../../src/protocol.h"
+#include "protocol.h"
 
 static int sock;
 static uint32_t seq = 0;

@@ -1,0 +1,7 @@
+# Opções do ESP-IDF usadas pelo firmware (aplicadas ao gerar o sdkconfig).
+
+# Servidor WebSocket do app web (hal_net, ws://IP/ws – RNFA02)
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# Menor latência na tarefa de timers (metrônomo e indicadores)
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=4096
