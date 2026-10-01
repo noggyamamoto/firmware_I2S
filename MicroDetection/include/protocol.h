@@ -1,14 +1,17 @@
 /*
  * ============================================================================
- * Protocolo de comunicação UDP entre o dispositivo embarcado e o app Flutter
+ * Protocolo de comunicação entre o dispositivo embarcado e o app Flutter
  *
  * Todos os pacotes começam com o mesmo cabeçalho de 12 bytes e usam
  * ordem de bytes little-endian (nativa do ESP32 e das plataformas do app).
  *
- *  - O dispositivo escuta comandos na porta PROTO_DEVICE_PORT.
- *  - O app envia os comandos a partir de um único socket e o dispositivo
- *    responde sempre para o IP/porta de origem do último CONNECT recebido.
- *  - A descoberta é feita por broadcast (DISCOVER) e respondida com ANNOUNCE.
+ * Transportes (hal_net):
+ *  - UDP na porta PROTO_DEVICE_PORT (app no celular/computador). O app envia
+ *    os comandos a partir de um único socket e o dispositivo responde para
+ *    o IP/porta de origem do último CONNECT recebido. A descoberta é feita
+ *    por broadcast (DISCOVER) e respondida com ANNOUNCE.
+ *  - WebSocket em ws://IP:WS_PORT/ws (app na web, sem UDP no navegador):
+ *    cada mensagem binária carrega exatamente um pacote.
  *
  * O mesmo protocolo está espelhado no app em:
  *   lib/features/connection/data/protocol/device_protocol.dart

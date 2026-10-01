@@ -1,64 +1,710 @@
-# firmware_I2S
+# firmware_I2S — Dispositivo de captação e detecção de notas
 
 Firmware do dispositivo embarcado do TCC **Sistema de Processamento de Áudio com Feedback em Tempo Real Aplicado ao Ensino de Partitura**.
 
-O dispositivo capta o som do teclado com o **microfone digital INMP441 (I2S)**, identifica as notas tocadas (altura e duração) e envia os eventos via **Wi-Fi (UDP)** para o [aplicativo Flutter](https://github.com/noggyamamoto/Flutter_App), que compara a execução com a partitura MusicXML. Também executa o metrônomo sonoro (buzzer) e visual (LED RGB).
+O dispositivo capta o som do teclado com o microfone digital **INMP441 (I2S)**, identifica as notas tocadas (altura e duração), envia os eventos ao [aplicativo Flutter](https://github.com/noggyamamoto/Flutter_App) por **Wi-Fi** e executa o metrônomo sonoro (buzzer) e visual (LED RGB). O app compara as notas recebidas com a partitura MusicXML e devolve o feedback ao aluno.
 
-## Stack
+---
 
-- **C**
-- **ESP-IDF 5.x** (FreeRTOS, driver I2S `i2s_std`, LEDC, esp_timer, NVS, lwIP)
-- **PlatformIO**
+## Sumário
 
-## Funcionalidades (requisitos do TCC)
+1. [Visão geral](#1-visão-geral)
+2. [Requisitos atendidos](#2-requisitos-atendidos)
+3. [Hardware](#3-hardware)
+4. [Arquitetura de software](#4-arquitetura-de-software)
+   - 4.1 [Camadas](#41-camadas)
+   - 4.2 [Estrutura de diretórios](#42-estrutura-de-diretórios)
+   - 4.3 [Módulos por camada](#43-módulos-por-camada)
+   - 4.4 [Diagrama de classes (módulos)](#44-diagrama-de-classes-módulos)
+   - 4.5 [Tarefas e concorrência](#45-tarefas-e-concorrência)
+5. [Fluxos de funcionamento](#5-fluxos-de-funcionamento)
+6. [Protocolo de comunicação](#6-protocolo-de-comunicação)
+7. [Configuração](#7-configuração)
+8. [Compilação e gravação](#8-compilação-e-gravação)
+9. [Operação do dispositivo](#9-operação-do-dispositivo)
+10. [Testes](#10-testes)
+11. [Solução de problemas](#11-solução-de-problemas)
+12. [Licença](#12-licença)
 
-| Requisito | Implementação |
+---
+
+## 1. Visão geral
+
+```mermaid
+flowchart LR
+    T["🎹 Teclado digital"] -- som --> M["Microfone INMP441"]
+    M -- I2S + DMA --> E["ESP32 / ESP32-S3<br/>filtro · YIN · segmentação"]
+    E -- "NOTE_ON / NOTE_OFF / BEAT<br/>(UDP ou WebSocket)" --> A["📱 App Flutter<br/>celular · computador · web"]
+    A -- "CONNECT / SESSION_START / SET_TEMPO" --> E
+    E -- PWM --> B["🔊 Buzzer<br/>(metrônomo sonoro)"]
+    E -- PWM --> R["🌈 LED RGB<br/>(metrônomo visual)"]
+    E -- GPIO --> L["💡 LED embutido<br/>(status da rede)"]
+```
+
+| Item | Descrição |
 |---|---|
-| RFE01 – Verificação de rede | Varredura das redes, conexão com novas tentativas, rede própria de reserva (modo AP) e LED de status |
-| RFE02 – Metrônomo sonoro | Buzzer passivo (LEDC), clique acentuado no tempo forte |
-| RFE03 – Metrônomo visual | LED RGB: azul (binário), verde (ternário), roxo (quaternário), amarelo na contagem |
-| RFE04 – Captação digital e filtragem | INMP441 via I2S (24 bits em slots de 32 bits, 16 kHz) + passa-banda 70 Hz–2,5 kHz |
-| RFE05 – Processamento digital de sinais | Altura pelo algoritmo **YIN** + segmentação em notas (ataque, soltura, duração) |
-| RFE06 – Transmissão | Eventos `NOTE_ON`/`NOTE_OFF` em pacotes UDP binários com sequência e timestamp |
-| RNFE01 – Baixa latência | Janelas de 16 ms; tempo de processamento exibido no menu serial (opção 3) |
-| RNFE03 – Imunidade a ruído | Filtro passa-banda + piso de ruído adaptativo + limiar mínimo |
-| RNFE04 – Tolerância temporal | Quantização dos tempos em 10 ms |
+| Linguagem | C (C17) |
+| Framework | ESP-IDF 5.x (FreeRTOS, `i2s_std`, LEDC, `esp_timer`, NVS, lwIP, `esp_http_server`) |
+| Ferramentas | PlatformIO ou `idf.py` (ESP-IDF) |
+| Placas | ESP32 DevKit V1 (MVP) e ESP32-S3 DevKitC-1 N16R8 (lista de materiais do TCC) |
+| Áudio | 16 kHz, 24 bits, janelas de 16 ms (hop) e 64 ms (análise) |
+| Comunicação | UDP (porta 54322) para celular/computador e WebSocket (`ws://IP/ws`) para o app web |
 
-## Hardware
+---
+
+## 2. Requisitos atendidos
+
+| Requisito (TCC) | Implementação | Módulo |
+|---|---|---|
+| **RFE01** – Verificação de rede | Varredura das redes, conexão com novas tentativas, rede própria de reserva (modo AP) e LED de status | `hal_wifi`, `hal_indicators`, `app_state` |
+| **RFE02** – Metrônomo sonoro | Buzzer passivo por PWM, clique acentuado no tempo forte | `metronome`, `hal_indicators` |
+| **RFE03** – Metrônomo visual | LED RGB: azul (binário), verde (ternário), roxo (quaternário), amarelo na contagem | `metronome`, `hal_indicators` |
+| **RFE04** – Captação digital e filtragem | INMP441 via I2S (24 bits em slots de 32 bits) + passa-banda 70 Hz – 2,5 kHz | `drv_i2s_mic`, `hal_audio`, `dsp` |
+| **RFE05** – Processamento digital de sinais | Altura pelo algoritmo **YIN** + segmentação em notas (ataque, soltura, duração) | `dsp`, `note_tracker`, `audio_pipeline` |
+| **RFE06** – Transmissão de dados | Pacotes binários com sequência e timestamp, por UDP ou WebSocket | `link_service`, `hal_net` |
+| **RNFE01** – Baixa latência | Janelas de 16 ms; tempo de processamento medido (menu serial, opção 3) | `audio_pipeline` |
+| **RNFE02** – Calibração de timbre | Faixa de altura e limiares ajustados para teclado digital (`config.h`) | `config.h`, `note_tracker` |
+| **RNFE03** – Imunidade a ruído | Passa-banda + piso de ruído adaptativo + limiar mínimo + máscara do clique | `dsp`, `note_tracker` |
+| **RNFE04** – Tolerância temporal | Quantização dos tempos em 10 ms | `note_tracker` |
+| **RNFA02** – Comunicação assíncrona | WebSocket para o app web e UDP para os apps nativos | `hal_net` |
+
+---
+
+## 3. Hardware
+
+### 3.1 Lista de materiais
+
+| Item | Qtd. | Função |
+|---|---|---|
+| ESP32-S3 N16R8 (ou ESP32 DevKit V1) | 1 | Aquisição, processamento e comunicação sem fio |
+| Microfone INMP441 | 1 | Captação digital do som (I2S) |
+| LED RGB catodo comum + 3 resistores 220 Ω | 1 | Metrônomo visual |
+| Buzzer passivo + transistor NPN | 1 | Metrônomo sonoro |
+| Regulador 7805 + fonte 9 V | 1 | Alimentação estável |
+| Protoboard e jumpers | — | Montagem do protótipo |
+
+### 3.2 Ligações
 
 | INMP441 | ESP32 DevKit V1 | ESP32-S3 N16R8 |
 |---|---|---|
 | VDD | 3V3 | 3V3 |
 | GND | GND | GND |
-| L/R | GND | GND |
+| L/R | GND (canal esquerdo) | GND |
 | SCK | GPIO26 | GPIO5 |
 | WS | GPIO25 | GPIO6 |
 | SD | GPIO33 | GPIO4 |
 
 | Indicador | ESP32 DevKit V1 | ESP32-S3 N16R8 |
 |---|---|---|
-| LED de status (+ resistor 220 Ω) | GPIO2 (LED on-board) | GPIO2 |
-| LED RGB catodo comum (R/G/B, resistores 220 Ω) | GPIO27 / 14 / 13 | GPIO15 / 16 / 17 |
+| LED de status | GPIO2 (LED embutido) | GPIO2 |
+| LED RGB (R / G / B) | GPIO27 / 14 / 13 | GPIO15 / 16 / 17 |
 | Buzzer passivo (via transistor) | GPIO18 | GPIO18 |
 
-Os pinos ficam em `MicroDetection/src/config.h` (para LED RGB de anodo comum, use `RGB_LED_COMMON_ANODE 1`).
+Os pinos ficam em [`include/config.h`](MicroDetection/include/config.h) e são escolhidos automaticamente pelo alvo de compilação. Para LED RGB de anodo comum, use `RGB_LED_COMMON_ANODE 1`.
 
-**LED de status:** piscando rápido = conectando ao Wi-Fi · duas piscadas = rede própria ativa · piscando lento = Wi-Fi conectado, aguardando o app · aceso = app pareado.
+---
 
-## Compilar e gravar
+## 4. Arquitetura de software
+
+### 4.1 Camadas
+
+O firmware é organizado em três camadas com dependência em um único sentido: **app → hal → drivers**. A aplicação não acessa periféricos nem APIs de hardware do ESP-IDF diretamente, o que facilita testes, trocas de placa e manutenção.
+
+```mermaid
+flowchart TB
+    subgraph APP["app/ — lógica da aplicação"]
+        direction LR
+        main["main"] --- state["app_state"] --- pipeline["audio_pipeline"] --- link["link_service"]
+        metro["metronome"] --- ui["serial_ui"] --- dsp["dsp · note_tracker"] --- cbuf["circular_buffer"]
+    end
+    subgraph HAL["hal/ — abstração de hardware"]
+        direction LR
+        haudio["hal_audio"] --- hind["hal_indicators"] --- hwifi["hal_wifi"] --- hnet["hal_net"]
+        hsto["hal_storage"] --- hcon["hal_console"] --- htime["hal_time"] --- hsys["hal_system"]
+    end
+    subgraph DRV["drivers/ — controle direto do hardware"]
+        direction LR
+        dgpio["drv_gpio"] --- dpwm["drv_pwm"] --- di2s["drv_i2s_mic"]
+        duart["drv_uart"] --- dnvs["drv_nvs"] --- dwifi["drv_wifi"]
+    end
+    subgraph IDF["ESP-IDF / FreeRTOS"]
+        direction LR
+        periph["GPIO · LEDC · I2S · UART · NVS · Wi-Fi"]
+        stack["lwIP · esp_http_server · esp_timer"]
+    end
+    APP --> HAL --> DRV --> periph
+    HAL --> stack
+```
+
+| Camada | Responsabilidade | Pode usar |
+|---|---|---|
+| `drivers/` | Controle direto dos periféricos (configurar pinos, PWM, I2S, UART, flash, rádio) | ESP-IDF (drivers de periféricos) |
+| `hal/` | Funções simples e reutilizáveis que escondem o hardware (ler áudio normalizado, piscar o LED, conectar ao Wi-Fi, enviar um pacote) | `drivers/`, serviços do ESP-IDF (timers, sockets, HTTP) |
+| `app/` | Fluxo de controle, regras do produto, protocolo, DSP, metrônomo e interface com o usuário | `hal/`, FreeRTOS, log |
+| `include/` | Cabeçalhos públicos de cada camada e configurações compartilhadas | — |
+
+### 4.2 Estrutura de diretórios
+
+```text
+MicroDetection/
+├── app/                      # lógica da aplicação (componente principal do ESP-IDF)
+│   ├── CMakeLists.txt        # registra app/, hal/ e drivers/ em um único componente
+│   ├── main.c                # app_main: inicialização em camadas e criação das tarefas
+│   ├── app_state.c           # sessão, pareamento, fila de saída e LED de status
+│   ├── audio_pipeline.c      # tarefa de áudio: microfone → DSP → eventos de nota
+│   ├── dsp.c                 # passa-banda (biquads RBJ), nível RMS e detector YIN
+│   ├── note_tracker.c        # segmentação em notas (ataque, soltura, reataque, quantização)
+│   ├── metronome.c           # metrônomo sonoro/visual com contagem de entrada
+│   ├── link_service.c        # protocolo com o app (comandos, respostas e eventos)
+│   ├── serial_ui.c           # menu serial de diagnóstico e configuração
+│   └── circular_buffer.c     # buffer circular de quadros brutos (modo diagnóstico)
+├── hal/                      # camada de abstração de hardware
+│   ├── hal_audio.c           # amostras float normalizadas + instante de cada bloco
+│   ├── hal_indicators.c      # LED de status, LED RGB e buzzer
+│   ├── hal_wifi.c            # conexão com novas tentativas e rede própria de reserva
+│   ├── hal_net.c             # transporte de pacotes: UDP e WebSocket
+│   ├── hal_storage.c         # credenciais do Wi-Fi na memória não volátil
+│   ├── hal_console.c         # console de texto (printf e leitura de linha)
+│   ├── hal_time.c            # relógio monotônico e temporizadores
+│   └── hal_system.c          # reinício e memória livre
+├── drivers/                  # controle direto de hardware
+│   ├── drv_gpio.c            # saídas digitais (LED embutido)
+│   ├── drv_pwm.c             # PWM por hardware (LEDC)
+│   ├── drv_i2s_mic.c         # microfone INMP441 (I2S + DMA)
+│   ├── drv_uart.c            # porta serial
+│   ├── drv_nvs.c             # partição NVS da flash
+│   └── drv_wifi.c            # rádio Wi-Fi (estação, ponto de acesso, varredura)
+├── include/                  # cabeçalhos
+│   ├── config.h              # pinos, parâmetros de áudio, DSP e rede
+│   ├── protocol.h            # formato binário dos pacotes (espelhado no app)
+│   ├── app/                  # cabeçalhos da camada de aplicação
+│   ├── hal/                  # cabeçalhos da HAL
+│   └── drivers/              # cabeçalhos dos drivers
+├── test/host/                # testes no computador (gcc) e ferramentas
+├── CMakeLists.txt            # projeto ESP-IDF
+├── platformio.ini            # projeto PlatformIO (src_dir = app)
+├── sdkconfig.defaults        # opções do ESP-IDF (WebSocket)
+└── sdkconfig.esp32doit-devkit-v1
+```
+
+> O ESP-IDF já possui um componente chamado `hal`; por isso as três camadas são compiladas em um único componente (registrado em `app/CMakeLists.txt`), e a separação é garantida pelos diretórios de cabeçalhos e pela regra de dependência acima.
+
+### 4.3 Módulos por camada
+
+#### drivers/
+
+| Módulo | Função | API principal |
+|---|---|---|
+| `drv_gpio` | Saída digital do LED embutido | `drv_gpio_output_init`, `drv_gpio_write` |
+| `drv_pwm` | Temporizadores e canais LEDC | `drv_pwm_timer_init`, `drv_pwm_channel_init`, `drv_pwm_set_duty`, `drv_pwm_set_freq` |
+| `drv_i2s_mic` | Canal I2S mestre RX (Philips, 32 bits, mono esquerdo) com DMA | `drv_i2s_mic_init`, `drv_i2s_mic_start`, `drv_i2s_mic_read` |
+| `drv_uart` | UART0 do monitor serial | `drv_uart_init`, `drv_uart_write`, `drv_uart_read_byte` |
+| `drv_nvs` | Leitura e escrita de strings na NVS | `drv_nvs_init`, `drv_nvs_get_str`, `drv_nvs_set_str` |
+| `drv_wifi` | Rádio Wi-Fi e eventos (STA, AP, IP, varredura) | `drv_wifi_init`, `drv_wifi_connect`, `drv_wifi_enable_ap`, `drv_wifi_scan` |
+
+#### hal/
+
+| Módulo | Função | API principal |
+|---|---|---|
+| `hal_audio` | Áudio em `float` [-1, 1) com ganho e carimbo de tempo | `hal_audio_read`, `hal_audio_next_sample_time_us` |
+| `hal_indicators` | Padrões do LED de status, flash do LED RGB, bipe | `hal_status_led_set`, `hal_rgb_flash`, `hal_buzzer_beep` |
+| `hal_wifi` | Política de conexão (tentativas, AP de reserva, estado) | `hal_wifi_start`, `hal_wifi_reconnect`, `hal_wifi_state` |
+| `hal_net` | Datagramas por UDP e WebSocket com endereço único (`NetPeer`) | `hal_net_init`, `hal_net_send`, `hal_net_peer_equal` |
+| `hal_storage` | Credenciais do Wi-Fi | `hal_storage_load_wifi`, `hal_storage_save_wifi` |
+| `hal_console` | Texto no monitor serial | `hal_console_printf`, `hal_console_readline` |
+| `hal_time` | Relógio e temporizadores | `hal_time_us`, `hal_timer_create`, `hal_timer_start_once` |
+| `hal_system` | Sistema | `hal_system_restart`, `hal_system_free_heap` |
+
+#### app/
+
+| Módulo | Função |
+|---|---|
+| `main` | Inicializa as camadas em ordem, trata falhas críticas e cria as tarefas |
+| `app_state` | Estado compartilhado: app pareado, sessão, flags, métricas, fila de saída e padrão do LED de status |
+| `audio_pipeline` | Tarefa produtora: lê o microfone, filtra, estima altura, segmenta notas e publica eventos |
+| `dsp` | Passa-banda (cascata de biquads RBJ), nível RMS em dBFS, detector de altura YIN |
+| `note_tracker` | Máquina de estados de notas (ver 5.3), piso de ruído adaptativo, reataque, quantização |
+| `metronome` | Batidas em instantes absolutos (sem deriva), contagem de entrada, som e luz, troca de BPM |
+| `link_service` | Interpreta os comandos do app e monta/envia os pacotes de resposta e de eventos |
+| `serial_ui` | Menu serial: captura local, status, Wi-Fi, metrônomo de teste, afinador |
+| `circular_buffer` | Buffer circular protegido por mutex para quadros de áudio bruto (diagnóstico) |
+
+### 4.4 Diagrama de classes (módulos)
+
+Em C, cada módulo funciona como uma classe com estado privado (`static`) e funções públicas declaradas em `include/`. O diagrama mostra os principais tipos, operações e dependências.
+
+```mermaid
+classDiagram
+    direction TB
+
+    class main {
+        <<app>>
+        +app_main()
+        -fatal(msg)
+        -on_wifi_state(state)
+    }
+    class app_state {
+        <<app>>
+        -NetPeer peer
+        -SessionInfo session
+        -QueueHandle_t queue
+        +app_state_set_peer(peer, name)
+        +app_state_session_start(bpm, beats, countIn, flags, local)
+        +app_state_session_stop()
+        +app_state_post(OutEvent) bool
+        +app_state_refresh_status_led()
+    }
+    class audio_pipeline {
+        <<app>>
+        -BandpassFilter filter
+        -YinDetector yin
+        -NoteTracker tracker
+        +audio_pipeline_init() bool
+        +audio_pipeline_start_task()
+        +audio_pipeline_mask_click(untilMs, hz)
+    }
+    class dsp {
+        <<app>>
+        +bandpass_process(filter, x, n)
+        +yin_detect(yin, window, confidence) float
+        +dsp_rms_db(x, n) float
+        +dsp_hz_to_midi(hz) float
+    }
+    class note_tracker {
+        <<app>>
+        -TrackerState state
+        -float noise_floor_db
+        +note_tracker_process(t, ms, db, hz, conf, events) int
+        +note_tracker_mask_until(t, ms, hz)
+        +note_tracker_flush(t, ms, event) bool
+    }
+    class metronome {
+        <<app>>
+        -HalTimer timer
+        +metronome_start(bpm, beats, countIn, flags, t0)
+        +metronome_set_tempo(bpm)
+        +metronome_stop()
+    }
+    class link_service {
+        <<app>>
+        +link_service_init() bool
+        +link_service_start()
+        -handle_packet(from, data, len)
+        -tx_task()
+    }
+    class serial_ui {
+        <<app>>
+        +serial_ui_start_task()
+    }
+    class OutEvent {
+        <<struct>>
+        OutEventType type
+        bool has_dest
+        NetPeer dest
+        uint32 timestamp_ms
+    }
+
+    class hal_audio {
+        <<hal>>
+        +hal_audio_init(n) bool
+        +hal_audio_read(out, n, timeout) size_t
+        +hal_audio_next_sample_time_us() int64
+    }
+    class hal_indicators {
+        <<hal>>
+        +hal_status_led_set(StatusPattern)
+        +hal_rgb_flash(r, g, b, ms)
+        +hal_buzzer_beep(hz, ms)
+    }
+    class hal_wifi {
+        <<hal>>
+        +hal_wifi_start(cred, onState) bool
+        +hal_wifi_reconnect(cred)
+        +hal_wifi_state() HalWifiState
+        +hal_wifi_scan(print) int
+    }
+    class hal_net {
+        <<hal>>
+        +hal_net_init(onReceive) bool
+        +hal_net_send(NetPeer, data, len) bool
+        +hal_net_peer_equal(a, b) bool
+    }
+    class NetPeer {
+        <<struct>>
+        NetPeerKind kind
+        uint32 ip
+        uint16 port
+        int ws_fd
+    }
+    class hal_storage {
+        <<hal>>
+        +hal_storage_load_wifi(out)
+        +hal_storage_save_wifi(cred) bool
+    }
+    class hal_console {
+        <<hal>>
+        +hal_console_printf(fmt)
+        +hal_console_readline(out, max, timeout, echo) int
+    }
+    class hal_time {
+        <<hal>>
+        +hal_time_us() int64
+        +hal_timer_create(cb, arg, name) HalTimer
+        +hal_timer_start_once(t, us)
+    }
+
+    class drv_i2s_mic {
+        <<driver>>
+        +drv_i2s_mic_init(cfg, n)
+        +drv_i2s_mic_read(out, n, timeout)
+    }
+    class drv_gpio {
+        <<driver>>
+        +drv_gpio_output_init(pin)
+        +drv_gpio_write(pin, level)
+    }
+    class drv_pwm {
+        <<driver>>
+        +drv_pwm_set_duty(ch, duty)
+        +drv_pwm_set_freq(timer, hz)
+    }
+    class drv_wifi {
+        <<driver>>
+        +drv_wifi_init(cb)
+        +drv_wifi_connect()
+        +drv_wifi_enable_ap(ssid, pass, ch)
+    }
+    class drv_nvs {
+        <<driver>>
+        +drv_nvs_get_str(ns, key, out, n)
+        +drv_nvs_set_str(ns, key, v)
+    }
+    class drv_uart {
+        <<driver>>
+        +drv_uart_write(port, data, len)
+        +drv_uart_read_byte(port, out, timeout)
+    }
+
+    main ..> app_state
+    main ..> audio_pipeline
+    main ..> link_service
+    main ..> serial_ui
+    main ..> hal_wifi
+    audio_pipeline ..> dsp
+    audio_pipeline ..> note_tracker
+    audio_pipeline ..> hal_audio
+    audio_pipeline ..> app_state : publica OutEvent
+    metronome ..> hal_indicators
+    metronome ..> app_state : publica BEAT
+    metronome ..> audio_pipeline : máscara do clique
+    link_service ..> app_state : consome a fila
+    link_service ..> hal_net
+    link_service ..> metronome
+    app_state ..> hal_indicators
+    app_state ..> hal_wifi
+    app_state "1" o-- "0..1" NetPeer : app pareado
+    app_state "1" o-- "*" OutEvent : fila de saída
+    serial_ui ..> hal_console
+    serial_ui ..> hal_storage
+    serial_ui ..> hal_wifi
+    hal_audio ..> drv_i2s_mic
+    hal_indicators ..> drv_gpio
+    hal_indicators ..> drv_pwm
+    hal_indicators ..> hal_time
+    hal_wifi ..> drv_wifi
+    hal_storage ..> drv_nvs
+    hal_console ..> drv_uart
+    hal_net ..> NetPeer
+```
+
+### 4.5 Tarefas e concorrência
+
+| Tarefa | Núcleo | Prioridade | Função |
+|---|---|---|---|
+| `audio_prod` | 1 | 5 | Microfone → DSP → eventos (núcleo exclusivo para não perder amostras) |
+| `net_tx` | 0 | 4 | Consome a fila de saída e envia pacotes (UDP ou WebSocket) |
+| `net_rx` | 0 | 3 | Recebe comandos UDP |
+| `httpd` | 0 | 5 (padrão) | Servidor WebSocket do app web |
+| `esp_timer` | 0 | 22 | Batidas do metrônomo, desligamento do LED/buzzer, monitor de PING |
+| `ui_task` | 0 | 1 | Menu serial |
+| `status_led` | 0 | 1 | Animação do LED de status |
+
+A comunicação entre tarefas usa uma **fila FreeRTOS** (`OutEvent`, 32 posições) como único caminho de saída para a rede; o estado compartilhado (`app_state`) é protegido por **mutex**; a máscara do clique do metrônomo usa **seção crítica**.
+
+```mermaid
+flowchart LR
+    subgraph C1["Núcleo 1"]
+        AP["audio_prod"]
+    end
+    subgraph C0["Núcleo 0"]
+        TM["esp_timer<br/>(metrônomo)"]
+        TX["net_tx"]
+        RX["net_rx (UDP)"]
+        WS["httpd (WebSocket)"]
+        UI["ui_task"]
+    end
+    AP -- "NOTE_ON/OFF, PITCH" --> Q[("Fila OutEvent")]
+    TM -- BEAT --> Q
+    RX -- "ANNOUNCE, ACK, PONG" --> Q
+    WS -- "ANNOUNCE, ACK, PONG" --> Q
+    Q --> TX
+    TX -- pacotes --> NET(("UDP / WebSocket"))
+    RX -. "comandos" .-> S[["app_state (mutex)"]]
+    WS -. "comandos" .-> S
+    UI -. "sessão local" .-> S
+    S -. "sessão ativa, t0" .-> AP
+```
+
+---
+
+## 5. Fluxos de funcionamento
+
+### 5.1 Inicialização
+
+```mermaid
+flowchart TD
+    A([Energização]) --> B["hal_console_init<br/>hal_indicators_init"]
+    B --> C{"hal_storage_init<br/>(NVS)"}
+    C -- falha --> F["fatal(): LED de erro<br/>e mensagem no serial"]
+    C -- ok --> D["app_state_init<br/>metronome_init"]
+    D --> E{"audio_pipeline_init<br/>(I2S + DSP)"}
+    E -- falha --> F
+    E -- ok --> G["hal_storage_load_wifi"]
+    G --> H{"hal_wifi_start"}
+    H -- falha --> F
+    H -- ok --> I{"link_service_init<br/>(UDP + WebSocket)"}
+    I -- falha --> F
+    I -- ok --> J["Cria tarefas:<br/>audio_prod · net_tx · net_rx · ui_task"]
+    J --> K([Sistema pronto])
+```
+
+### 5.2 Processamento de áudio (a cada 16 ms)
+
+```mermaid
+flowchart TD
+    A["hal_audio_read<br/>256 amostras (16 ms)"] --> B["Passa-banda<br/>70 Hz – 2,5 kHz"]
+    B --> C["Janela deslizante<br/>1024 amostras (64 ms)"]
+    C --> D["Nível RMS (dBFS)"]
+    C --> E["YIN: frequência + confiança"]
+    D --> F{"Sessão mudou?"}
+    E --> F
+    F -- sim --> G["Fecha nota aberta<br/>e reinicia o rastreador"]
+    F -- não --> H
+    G --> H["Aplica máscara do clique<br/>do metrônomo"]
+    H --> I["note_tracker_process"]
+    I --> J{"Sessão ativa e<br/>após o instante zero?"}
+    J -- não --> L
+    J -- sim --> K["Publica NOTE_ON / NOTE_OFF<br/>(+ PITCH e quadros brutos, se ativados)"]
+    K --> L["Mede o tempo de processamento<br/>(RNFE01)"]
+    L --> A
+```
+
+### 5.3 Segmentação de notas
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> CANDIDATE: nível > piso de ruído + margem
+    CANDIDATE --> ACTIVE: mesma nota em N janelas<br/>(confiança ≥ mínima) / NOTE_ON
+    CANDIDATE --> IDLE: tempo esgotado ou nível caiu
+    ACTIVE --> ACTIVE: reataque (salto de energia) / NOTE_OFF + NOTE_ON
+    ACTIVE --> ACTIVE: nova altura estável (legato) / NOTE_OFF + NOTE_ON
+    ACTIVE --> IDLE: nível abaixo do limiar ou queda grande<br/>em relação ao pico / NOTE_OFF
+    note right of IDLE
+        O piso de ruído é atualizado
+        continuamente em silêncio (RNFE03)
+    end note
+```
+
+### 5.4 Conexão Wi-Fi e LED de status
+
+```mermaid
+stateDiagram-v2
+    [*] --> Varredura
+    Varredura --> RedePropria: nenhuma rede configurada
+    Varredura --> Conectando: credenciais na NVS
+    Conectando --> Conectado: IP recebido
+    Conectando --> Conectando: falha (até 8 tentativas)
+    Conectando --> RedePropria: tentativas esgotadas
+    RedePropria --> Conectado: nova tentativa a cada 15 s
+    Conectado --> Conectando: conexão perdida
+    Conectado --> Pareado: CONNECT do app
+    RedePropria --> Pareado: CONNECT do app
+    Pareado --> Conectado: DISCONNECT ou 5 s sem PING
+
+    note right of Conectando: LED pisca rápido (5 Hz)
+    note right of RedePropria: LED com 2 piscadas curtas
+    note right of Conectado: LED pisca lento (1 Hz)
+    note right of Pareado: LED aceso
+```
+
+### 5.5 Pareamento e execução com o app
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as App Flutter
+    participant Servico as link_service
+    participant State as app_state
+    participant Metro as metronome
+    participant Audio as audio_pipeline
+
+    App->>Servico: DISCOVER (broadcast UDP ou ws://IP/ws)
+    Servico-->>App: ANNOUNCE (nome, firmware, MAC, RSSI)
+    App->>Servico: CONNECT (nome do app)
+    Servico->>State: app_state_set_peer()
+    Servico-->>App: CONNECT_ACK (aceito)
+    loop a cada 1 s
+        App->>Servico: PING
+        Servico-->>App: PONG (estado, RSSI, piso de ruído)
+    end
+    App->>Servico: SESSION_START (BPM, compasso, 2 compassos de contagem)
+    Servico->>State: session_start() — t0 = agora
+    State->>Metro: metronome_start(t0)
+    loop cada batida
+        Metro-->>App: BEAT (contagem / compasso)
+    end
+    loop cada nota tocada
+        Audio-->>App: NOTE_ON (MIDI, Hz, confiança)
+        Audio-->>App: NOTE_OFF (duração)
+    end
+    App->>Servico: SET_TEMPO (redução de BPM – RFA09)
+    Servico->>Metro: metronome_set_tempo()
+    App->>Servico: SESSION_STOP / DISCONNECT
+    Servico->>State: session_stop() / clear_peer()
+```
+
+### 5.6 Metrônomo
+
+As batidas são agendadas em **instantes absolutos** a partir de `t0` (início da sessão), evitando deriva acumulada. Durante os compassos de contagem, som e luz são sempre acionados (aviso de preparação – RFA05/RU07); depois, seguem as opções do app. A cada clique, o pipeline de áudio recebe uma máscara para não confundir o som do buzzer com uma nota.
+
+---
+
+## 6. Protocolo de comunicação
+
+Definido em [`include/protocol.h`](MicroDetection/include/protocol.h) e espelhado no app em `lib/features/connection/data/protocol/device_protocol.dart`.
+
+### 6.1 Transportes
+
+| Transporte | Endereço | Usado por |
+|---|---|---|
+| UDP | porta **54322** (descoberta por broadcast) | App no Android, iOS, Windows, macOS e Linux |
+| WebSocket | `ws://IP_DO_DISPOSITIVO/ws` (porta 80), uma mensagem binária por pacote | App na web (o navegador não tem UDP) |
+
+### 6.2 Cabeçalho (12 bytes, little-endian)
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `magic` | `uint16` | `0x5443` ("TC") |
+| `version` | `uint8` | Versão do protocolo (1) |
+| `type` | `uint8` | Tipo do pacote |
+| `sequence` | `uint32` | Número sequencial (detecção de perdas) |
+| `timestamp_ms` | `uint32` | Tempo desde o início da sessão (o instante 0 é o início da contagem) |
+
+### 6.3 Pacotes
+
+| Código | App → dispositivo | Conteúdo |
+|---|---|---|
+| `0x01` | `DISCOVER` | — |
+| `0x02` | `CONNECT` | nome do app |
+| `0x03` | `DISCONNECT` | — |
+| `0x04` | `PING` | — (a cada 1 s) |
+| `0x05` | `CONFIG` | BPM, tempos por compasso, flags |
+| `0x06` | `SESSION_START` | BPM, tempos por compasso, compassos de contagem, flags |
+| `0x07` | `SESSION_STOP` | — |
+| `0x08` | `SET_TEMPO` | novo BPM (vale a partir da próxima batida) |
+
+| Código | Dispositivo → app | Conteúdo |
+|---|---|---|
+| `0x81` | `ANNOUNCE` | nome, versão do firmware, MAC, estado, RSSI, taxa de amostragem |
+| `0x82` | `CONNECT_ACK` | aceito (1) ou em uso por outro app (0) |
+| `0x83` | `PONG` | estado, RSSI, piso de ruído, eventos descartados |
+| `0x84` | `NOTE_ON` | nota MIDI, frequência, nível, confiança |
+| `0x85` | `NOTE_OFF` | nota MIDI, duração, frequência média |
+| `0x86` | `PITCH` | frequência contínua (afinador, opcional) |
+| `0x87` | `BEAT` | tempo no compasso, contagem, índice do compasso, BPM |
+| `0x88` | `AUDIO_FRAME` | 1024 amostras PCM 16 bits + energia (diagnóstico) |
+
+Flags (`CONFIG`/`SESSION_START`): `0x01` metrônomo sonoro · `0x02` metrônomo visual · `0x04` áudio bruto · `0x08` altura contínua.
+
+Regras: somente o app pareado controla a sessão; outro app só assume o dispositivo se o anterior ficar 5 s sem enviar `PING` (RU02); `DISCONNECT` libera o dispositivo imediatamente (RU17).
+
+---
+
+## 7. Configuração
+
+Principais parâmetros de [`include/config.h`](MicroDetection/include/config.h):
+
+| Grupo | Parâmetro | Padrão | Descrição |
+|---|---|---|---|
+| Áudio | `SAMPLE_RATE` | 16000 | Taxa de amostragem (Hz) |
+| | `HOP_SAMPLES` / `WINDOW_SAMPLES` | 256 / 1024 | Passo (16 ms) e janela de análise (64 ms) |
+| | `INPUT_GAIN` | 4.0 | Ganho digital do INMP441 |
+| DSP | `BANDPASS_LOW_HZ` / `BANDPASS_HIGH_HZ` | 70 / 2500 | Faixa do filtro |
+| | `PITCH_MIN_HZ` / `PITCH_MAX_HZ` | 65 / 2100 | Faixa de altura (C2 – C7) |
+| | `YIN_THRESHOLD` / `MIN_CONFIDENCE` | 0.15 / 0.70 | Limiar do YIN e confiança mínima |
+| Notas | `GATE_MARGIN_DB` / `GATE_MIN_DB` | 12 / −62 | Margem sobre o piso de ruído e limiar absoluto |
+| | `STABLE_HOPS` / `MIN_NOTE_MS` | 2 / 60 | Confirmação da altura e duração mínima |
+| | `QUANTIZE_MS` | 10 | Quantização temporal (RNFE04) |
+| | `CLICK_MASK_MS` | 45 | Máscara do clique do metrônomo |
+| Rede | `WIFI_MAX_RETRIES` | 8 | Tentativas antes da rede própria |
+| | `WIFI_AP_PASS` / `WIFI_AP_CHANNEL` | `partitura123` / 6 | Rede própria |
+| | `WS_PORT` | 80 | Servidor WebSocket |
+| | `SESSION_TIMEOUT_MS` | 5000 | Tempo sem `PING` para liberar o dispositivo |
+
+As opções do ESP-IDF necessárias (suporte a WebSocket no `esp_http_server`) estão em `sdkconfig.defaults`.
+
+---
+
+## 8. Compilação e gravação
+
+### 8.1 PlatformIO (recomendado)
 
 ```bash
 cd MicroDetection
 pio run -e esp32doit-devkit-v1 -t upload      # ESP32 DevKit V1
 pio run -e esp32-s3-devkitc-1 -t upload       # ESP32-S3 N16R8
-pio device monitor
+pio device monitor                            # 115200 bps
 ```
 
-### Wi-Fi
+### 8.2 ESP-IDF (`idf.py`)
 
-Na primeira execução não há rede configurada: o dispositivo cria a rede **PartituraIoT-XXXX** (senha `partitura123`). Para usar a rede da escola/casa, abra o monitor serial e escolha a opção **5 – Configurar rede Wi-Fi**; as credenciais ficam salvas na NVS. O app precisa estar na mesma rede que o dispositivo.
+```bash
+cd MicroDetection
+idf.py set-target esp32        # ou esp32s3
+idf.py build flash monitor
+```
 
-### Menu serial (115200 bps)
+Sem o ESP-IDF instalado, a imagem oficial em Docker compila o projeto:
+
+```bash
+docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.5.3 \
+    idf.py -B build-esp32 -DSDKCONFIG=/project/sdkconfig.esp32doit-devkit-v1 build
+```
+
+> Validação desta versão: compilação sem avisos com ESP-IDF 5.5.3 para **ESP32** (`MicroDetection.bin` ≈ 860 KB, 16% livre na partição) e **ESP32-S3** (≈ 852 KB, 17% livre).
+
+---
+
+## 9. Operação do dispositivo
+
+### 9.1 Wi-Fi
+
+Na primeira execução não há rede configurada: o dispositivo cria a rede **PartituraIoT-XXXX** (senha `partitura123`, IP `192.168.4.1`). Para usar a rede da escola/casa, abra o monitor serial e escolha **5 – Configurar rede Wi-Fi**; as credenciais ficam salvas na NVS. O app precisa estar na mesma rede do dispositivo.
+
+No **app web**, a busca automática por broadcast não existe: informe o IP do dispositivo (exibido na opção 3 do menu serial) ou conecte o computador à rede própria do dispositivo e use `192.168.4.1`. Abra o app web por `http://` (páginas `https://` não podem abrir conexões `ws://` sem criptografia).
+
+### 9.2 LED de status
+
+| Padrão | Significado |
+|---|---|
+| Piscando rápido | Conectando ao Wi-Fi |
+| Duas piscadas curtas | Rede própria (modo AP) ativa |
+| Piscando lento | Wi-Fi conectado, aguardando o app |
+| Aceso | App pareado |
+| Piscando (erro) | Falha crítica na inicialização (ver monitor serial) |
+
+### 9.3 Menu serial (115200 bps)
 
 ```
 1 - Iniciar captura local (teste sem o app)
@@ -72,254 +718,45 @@ Na primeira execução não há rede configurada: o dispositivo cria a rede **Pa
 9 - Reiniciar dispositivo
 ```
 
-## Arquitetura do firmware
+A opção **3 – Status** mostra rede, IP, app pareado (e se por UDP ou WebSocket), notas detectadas, pacotes enviados, nível de entrada, piso de ruído, tempo de processamento por janela e memória livre.
 
-```
-I2S (INMP441) ─DMA─► audio_prod (núcleo 1, prio 5)
-                      │ passa-banda → janela 1024 → YIN → segmentação
-                      ▼
-                 fila de eventos ──► net_tx (núcleo 0) ──UDP──► app
-                                           ▲
-          metrônomo (esp_timer) ─ batidas ─┘
-app ──UDP──► net_rx (núcleo 0): DISCOVER, CONNECT, PING, SESSION_START/STOP, SET_TEMPO
-```
+---
 
-| Arquivo | Função |
-|---|---|
-| `main.c` | Inicialização e criação das tarefas |
-| `config.h` | Pinos, parâmetros de áudio, DSP e rede |
-| `protocol.h` | Formato binário dos pacotes UDP (espelhado no app) |
-| `audio_capture.c` | Driver I2S do INMP441 |
-| `dsp.c` | Passa-banda (biquads RBJ) e detector de altura YIN |
-| `note_tracker.c` | Ataque/soltura, piso de ruído, reataque, legato, quantização |
-| `audio_pipeline.c` | Tarefa de áudio: captura → DSP → eventos |
-| `udp_link.c` | Recepção de comandos e envio de eventos |
-| `metronome.c` | Metrônomo sonoro/visual com contagem de entrada |
-| `wifi_manager.c` | Varredura, conexão, novas tentativas e modo AP |
-| `indicators.c` | LED de status, LED RGB e buzzer |
-| `settings.c` | Credenciais na NVS |
-| `serial_ui.c` | Menu serial e diagnóstico |
-| `circular_buffer.c` | Buffer circular de quadros brutos (modo diagnóstico) |
+## 10. Testes
 
-## Protocolo UDP
+| Teste | Comando | O que valida |
+|---|---|---|
+| DSP no computador | `make -C MicroDetection/test/host` | Filtro, YIN e segmentação com sinais sintéticos de teclado, ruído de sala e cliques do metrônomo |
+| Dispositivo falso (UDP) | `make -C MicroDetection/test/host fake_device && ./MicroDetection/test/host/fake_device` | Protocolo completo para testar o app sem hardware (descoberta, pareamento, batidas e escala de Dó) |
+| Ponte WebSocket | `python3 MicroDetection/test/host/ws_bridge.py 80` (com o `fake_device` rodando) | App web conversando com o dispositivo falso por `ws://127.0.0.1/ws` |
+| Compilação do firmware | ver seção 8 | ESP32 e ESP32-S3 |
 
-Todos os pacotes começam com um cabeçalho de 12 bytes (little-endian): `magic 0x5443 | versão | tipo | sequência | timestamp_ms`. O dispositivo escuta na porta **54322** e responde ao endereço de origem do app. Detalhes em [`src/protocol.h`](MicroDetection/src/protocol.h).
-
-| App → dispositivo | Dispositivo → app |
-|---|---|
-| `DISCOVER` (broadcast) | `ANNOUNCE` (nome, firmware, MAC, RSSI) |
-| `CONNECT` | `CONNECT_ACK` |
-| `PING` (1 s) | `PONG` (estado, RSSI, ruído) |
-| `SESSION_START` (BPM, compasso, contagem) | `BEAT` (a cada tempo) |
-| `SET_TEMPO`, `CONFIG`, `SESSION_STOP`, `DISCONNECT` | `NOTE_ON` / `NOTE_OFF` (MIDI, Hz, duração) |
-
-O tempo 0 da sessão é o início da contagem de entrada; a música começa após 2 compassos.
-
-## Testes no computador
-
-O DSP (filtro, YIN e segmentação) não depende do ESP-IDF e é testado com sinais sintéticos de teclado, com ruído de sala e cliques do metrônomo:
+Testes de integração no repositório do app:
 
 ```bash
-make -C MicroDetection/test/host          # testes do pipeline de DSP
-make -C MicroDetection/test/host fake_device
-./MicroDetection/test/host/fake_device    # dispositivo falso para testar o app sem hardware
+# App nativo (UDP)
+FAKE_DEVICE=/caminho/fake_device flutter test test/connection/udp_device_test.dart
+
+# App web (WebSocket, no Chrome)
+flutter test --platform chrome --dart-define=WS_DEVICE=true \
+    test/connection/websocket_device_test.dart
 ```
 
 ---
 
-## Documento de concepção (versão inicial do projeto)
+## 11. Solução de problemas
 
-> A seção abaixo registra a concepção inicial. Na implementação atual, a detecção de notas é feita no próprio ESP32 (requisito RFE05 do TCC) e o app recebe apenas os eventos de nota.
+| Sintoma | Causa provável | Ação |
+|---|---|---|
+| LED pisca rápido sem parar | Rede ou senha incorretas | Menu serial, opção 5; após 8 tentativas a rede própria é ativada |
+| App não encontra o dispositivo | Redes diferentes ou broadcast bloqueado | Use "Conectar pelo IP" no app (IP na opção 3 do menu) |
+| App web não conecta | Página aberta por `https://` ou IP errado | Abra o app web por `http://` e informe o IP do dispositivo |
+| "Leitura I2S incompleta" no log | Ligações do INMP441 | Confira SCK/WS/SD e L/R em GND |
+| Notas falsas com o metrônomo | Buzzer muito próximo do microfone | Afaste o buzzer ou reduza o volume; ajuste `CLICK_MASK_MS` |
+| Notas não detectadas | Nível baixo | Aproxime o microfone ou aumente `INPUT_GAIN`; verifique o piso de ruído na opção 3 |
 
+---
 
-## 1. Visão Geral e Objetivos
+## 12. Licença
 
-O sistema captura uma performance em teclado elétrico e gera automaticamente a partitura correspondente.
-
-Para atender ao rigor científico, o projeto adota uma arquitetura híbrida:
-
-- **Entrada MIDI (Musical Instrument Digital Interface)** – referência perfeitamente conhecida – serve como **ground truth** (referência de validação) para comparação objetiva.
-- **Entrada de áudio** (capturada por microfone ou saída de linha) – processada pelo algoritmo de transcrição automática.
-
-Assim é possível medir objetivamente a qualidade da transcrição por áudio, comparando-a com os eventos MIDI registrados simultaneamente. O sistema compõe-se de um subsistema embarcado (ESP32) para captura e envio do sinal de áudio (opcionalmente também do MIDI) e de um aplicativo Flutter que concentra todo o processamento inteligente, a geração da partitura e a validação.
-
-## 2. Arquitetura Geral
-
-```text
-┌──────────────────────────┐       Wi-Fi (UDP)        ┌──────────────────────────────────────────┐
-│  Teclado Elétrico        │                          │  Aplicativo Flutter (Mobile / Desktop)   │
-│                          │                          │                                          │
-│  ┌─────────┐  Line Out   │   ┌──────────────────┐  │  ┌──────────────────────────────────┐    │
-│  │ Saída   │─────────────┼──▶│ ESP32            │  │  │ Módulo de Recepção               │    │
-│  │ Áudio   │             │   │ (I2S INMP441 ou  │  │  │ - Buffer de pacotes UDP          │    │
-│  └─────────┘             │   │ entrada direta)  │  │  │ - Reconstrói stream de áudio     │    │
-│                          │   │ - Filtro passa-banda│  │  └────────────┬─────────────────────┘    │
-│  ┌─────────┐             │   │                  │  │               │                          │
-│  │ Saída   │─────────────┼──▶│ - Normalização   │  │               ▼                          │
-│  │ MIDI    │             │   │ - Buffer circular│  │  ┌──────────────────────────────────┐    │
-│  └─────────┘             │   │ - Encapsulamento │──┼─▶│ Pipeline de Processamento Áudio  │    │
-│                          │   │   binário +      │  │  │ (Dart FFI → C/C++)               │    │
-│                          │   │   cabeçalho      │  │  │ - FFT (1024 amostras)            │    │
-│                          │   └──────────────────┘  │  │ - Detecção de Pitch (f → MIDI)   │    │
-│                          │                         │  │ - Chroma Vector                  │    │
-│                          │                         │  │ - Detecção de Acordes (templates)│    │
-│                          │                         │  │ - Detecção de Onset (energia/fluxo)│  │
-│                          │                         │  └────────────┬─────────────────────┘    │
-│                          │                         │               │                          │
-│                          │                         │               │ Notas/Acordes detectados  │
-│                          │                         │               ▼                          │
-│                          │  ┌──────────────────┐   │  ┌──────────────────────────────────┐    │
-│                          │  │ Cabo MIDI → USB  │───┼─▶│ Módulo MIDI (Ground Truth)       │    │
-│                          │  │ (direto ao app)  │   │  │ - Parser de eventos MIDI        │    │
-│                          │  └──────────────────┘   │  │ - Agrupamento polifônico         │    │
-│                          │                         │  └────────────┬─────────────────────┘    │
-│                          │                         │               │ Notas “reais”             │
-│                          │                         │               ▼                          │
-│                          │                         │  ┌──────────────────────────────────┐    │
-│                          │                         │  │ Módulo de Validação              │    │
-│                          │                         │  │ - Compara notas (altura, onset,  │    │
-│                          │                         │  │   duração) entre áudio e MIDI    │    │
-│                          │                         │  │ - Calcula métricas: Precisão,    │    │
-│                          │                         │  │   Revocação, Erro de frequência, │    │
-│                          │                         │  │   Atraso de onset                │    │
-│                          │                         │  └────────────┬─────────────────────┘    │
-│                          │                         │               │                          │
-│                          │                         │               ▼                          │
-│                          │                         │  ┌──────────────────────────────────┐    │
-│                          │                         │  │ Construtor de Partitura          │    │
-│                          │                         │  │ - Quantização rítmica            │    │
-│                          │                         │  │ - Modelo de dados (Note, Chord)  │    │
-│                          │                         │  │ - Renderização (VexFlow/WebView) │    │
-│                          │                         │  └──────────────────────────────────┘    │
-│                          │                         │                                          │
-└──────────────────────────┘                         └──────────────────────────────────────────┘
-```
-
-> **Nota:** O caminho principal deste projeto usa microfone I2S INMP441. O áudio também pode vir da saída de fone/line do teclado para o ESP32 via entrada ADC (Analog-to-Digital Converter) com acoplamento AC para remover offset DC. Isso ajuda a manter um sinal limpo e controlado.
-> O MIDI pode chegar por USB/DIN ao sistema, e na arquitetura proposta segue diretamente para o Flutter via USB, evitando a necessidade do ESP32 nessa rota.
-
-## 3. Decisões de Projeto e Fundamentação
-
-### 3.1 Por que concentrar a inteligência no Flutter, e não no ESP32?
-
-- **Capacidade computacional:** O ESP32 não possui poder de processamento suficiente para executar, com folga em tempo real, uma FFT (Fast Fourier Transform – Transformada Rápida de Fourier) em alta resolução espectral, detecção simultânea de múltiplos pitches (alturas) e comparação com templates complexos de acordes.
-- **Manutenibilidade e depuração:** Todo o código de análise musical reside em um ambiente de desenvolvimento moderno (Dart / C++ via FFI – Foreign Function Interface), com ferramentas robustas de teste e profiling.
-- **Modularidade:** Isolando o hardware embarcado apenas para captura e transmissão, o sistema fica mais simples de validar e pode evoluir independentemente (ex.: substituir o ESP32 por outro módulo de áudio sem afetar o núcleo do projeto).
-
-### 3.2 Por que usar MIDI como ground truth?
-
-- **Precisão absoluta:** O MIDI fornece exatamente quais notas foram tocadas, com onset (instante de início), duração e velocity (velocidade/força de toque), sem ambiguidade de altura ou mistura harmônica.
-- **Validação científica robusta:** A transcrição por áudio é um problema complexo (polifonia, ruído, sobreposição espectral). Comparar o resultado do algoritmo com uma referência confiável permite calcular métricas objetivas (erro de nota, atraso de onset etc.), conferindo rigor à pesquisa.
-- **Facilidade para experimentos controlados:** O teclado elétrico garante execuções repetíveis, essenciais para avaliação quantitativa.
-
-### 3.3 Por que usar Wi-Fi com UDP para áudio, e não BLE ou TCP?
-
-- **BLE:** Largura de banda frequentemente insuficiente para streaming de áudio contínuo de baixa latência (especialmente em cenários BLE 4.x e com overhead prático de enlace/aplicação), e alto overhead para pacotes pequenos. Mesmo para 16 kHz / 16 bits em mono (taxa bruta de 256 kbps), a estabilidade ponta a ponta pode ficar comprometida.
-- **TCP:** Embora confiável, o mecanismo de retransmissão introduz latência acumulada e variações de jitter (variação no atraso) que podem distorcer a linha de tempo, prejudicando a detecção rítmica.
-- **UDP:** Oferece baixa latência e jitter previsível. Perdas ocasionais de pacotes são toleráveis, pois o sistema pode realizar interpolação ou simplesmente lidar com um pequeno gap que não compromete a análise espectral. Para compensar pacotes perdidos, utiliza-se numeração sequencial no cabeçalho do quadro (frame).
-
-### 3.4 Formato de transmissão do áudio
-
-Optou-se por binário com cabeçalho estruturado em vez de JSON ou texto puro:
-
-- **Eficiência:** JSON multiplica o tamanho dos dados por 5–10×, desperdiçando banda e aumentando a latência.
-
-Estrutura proposta (16 bytes de cabeçalho + N amostras):
-
-```text
-[uint32 timestamp_ms]        // tempo em milissegundos
-[uint32 sequence_number]     // número sequencial do pacote
-[uint32 num_samples]         // ex.: 512
-[float  energy]              // energia média do quadro
-[int16 samples[num_samples]] // amostras de áudio com sinal de 16 bits
-```
-
-O campo `energy`, já pré-calculado, auxilia na detecção de onset dentro do Flutter, sem custo adicional.
-
-### 3.5 Processamento de áudio no Flutter: por que C/C++ via FFI?
-
-Flutter/Dart é adequado para lógica de alto nível e UI, mas o processamento intensivo de sinais (DSP – Digital Signal Processing) como FFT, auto-correlação e operações com vetores seria ineficiente em Dart puro.
-
-Usando `dart:ffi`, compila-se uma biblioteca nativa (em C/C++) com algoritmos otimizados (ex.: FFTW, KissFFT ou implementação própria). A vantagem é desempenho próximo ao nativo e acesso direto a buffers de áudio.
-
-O pipeline de áudio fica encapsulado em uma classe que recebe buffers de amostras e retorna eventos musicais (listas de notas ou acordes), mantendo a separação de responsabilidades.
-
-### 3.6 Detecção de acordes: Chroma Vector + Template Matching
-
-O chroma vector (vetor cromático) reduz o espectro a 12 classes de altura (uma por semitom), tornando o reconhecimento de acordes independente da oitava e mais robusto.
-
-Para um teclado com, no máximo, 3–4 notas simultâneas, a abordagem por templates (comparação da similaridade do cosseno com modelos armazenados de acordes maiores, menores, com 7ª etc.) funciona com excelente acurácia.
-
-O uso exclusivo de áudio para acordes mais complexos (ex.: tétrades, disposições abertas) pode ter limitações; por isso o MIDI é essencial para avaliar os limites do algoritmo.
-
-### 3.7 Quantização rítmica
-
-Transformar tempos absolutos (em segundos) em figuras musicais (semínima, colcheia etc.) requer:
-
-- Estimação do BPM (Batidas por Minuto), obtida pelo espaçamento entre ataques sucessivos (onset detection – detecção de início de nota).
-- Construção de uma grade rítmica adaptativa (ex.: usando algoritmo de clustering dos onsets associado a um BPM predominante).
-- Aproximação de cada onset para a posição rítmica mais próxima, respeitando um limiar de erro (ex.: ±30 ms). Notas muito distantes da grade podem indicar erro de detecção, métrica que também se avalia comparando com o MIDI.
-
-## 4. Descrição dos Componentes Principais
-
-### 4.1 Subsistema Embarcado (ESP32)
-
-**Responsabilidades:**
-
-- Aquisição de áudio via I2S (microfone INMP441 ou entrada analógica condicionada via ADC), com taxa de amostragem de 16 kHz / 16 bits (equilíbrio ideal entre qualidade espectral e taxa de dados).
-- Pré-processamento leve:
-  - Filtro passa-banda digital (80 Hz – 2 kHz) para remover ruídos fora da faixa útil do teclado.
-  - Normalização de amplitude para evitar saturação.
-- Empacotamento em frames binários com timestamp, sequência e energia.
-- Envio via UDP a cada quadro (ex.: a cada 512 amostras ≈ 32 ms), com buffer circular para absorver bursts (rajadas) de transmissão.
-
-**Nota sobre o MIDI:** O ESP32 pode opcionalmente atuar como ponte MIDI-Wi-Fi, mas na arquitetura proposta o MIDI vai direto ao Flutter via USB para simplicidade e menor latência.
-
-### 4.2 Aplicativo Flutter
-
-**Módulos:**
-
-- **Receptor UDP:** isolate separado que recebe pacotes, trata perdas e monta o buffer contínuo de áudio.
-- **Parser MIDI** (via biblioteca como `flutter_midi_command` ou similar): abstrai eventos MIDI para uma lista de notas com `(midiNote, velocity, startTime, endTime)`, tratando corretamente polifonia e pedal de sustain.
-- **Motor de análise de áudio (C++/FFI):**
-  - FFT com janela de Hann (1024 amostras, sobreposição de 50%), gerando espectro de magnitude.
-  - Detecção de pitch por pico espectral refinado: para cada quadro estima a frequência fundamental (`f`, em Hz); converte para número MIDI com a fórmula `midiNote = 69 + 12 * log2(f / 440.0)`.
-  - Chroma: reduz o espectro a um vetor de 12 posições (uma por semitom).
-  - Detecção de acordes: compara o chroma acumulado em janelas temporais com templates ideais (usando distância do cosseno).
-  - Onset: função de detecção baseada na variação da energia espectral entre quadros, com pico seguido de limiar adaptativo.
-  - Tracking de notas: associa onsets e offsets (fins de nota) para construir notas contínuas, lidando com sobreposição polifônica limitada.
-- **Validador:**
-  - Casa os eventos detectados por áudio com os eventos MIDI (referência), estabelecendo correspondência ótima por proximidade temporal (< 100 ms, limiar inicial para tolerar jitter de captura/transporte sem perder alinhamento musical) e similaridade de altura.
-  - Calcula métricas: precisão, revocação, F1-score por nota; erro absoluto de onset (média e desvio padrão); acurácia de acordes.
-- **Construtor da partitura:**
-  - Aplica quantização sobre os eventos MIDI (tempo absoluto) ou, no modo apenas áudio, sobre as notas detectadas.
-  - Preenche uma representação simbólica da peça (lista de compassos, cada um com figuras e notas).
-  - Renderizador: usa VexFlow em WebView ou gera SVG customizado, exibindo partitura final e permitindo exportação (MusicXML, PDF).
-
-## 5. Fluxo de Dados e Interação entre Caminhos
-
-### Cenário de validação (híbrido)
-
-1. O músico toca no teclado; simultaneamente:
-   - O áudio é captado pelo ESP32 e transmitido.
-   - O MIDI é enviado via USB para o Flutter.
-2. O Flutter recebe as duas streams com timestamps sincronizados (sincronia por evento inicial comum, como clique audível ou pressionamento de tecla no início da gravação).
-3. O pipeline de áudio gera uma lista de eventos musicais estimados.
-4. O módulo MIDI produz a lista de eventos de referência.
-5. O validador computa as métricas de desempenho.
-6. A partitura é gerada a partir da referência MIDI (partitura “perfeita”) e, opcionalmente, exibe-se sobreposição visual dos erros (notas omitidas, adições incorretas, diferenças de ritmo).
-7. Os resultados são apresentados no app: partitura, gráficos de erro e indicadores numéricos.
-
-### Cenário sem MIDI (uso real)
-
-Apenas o ramo de áudio opera, e a partitura é gerada com base nas notas detectadas. A confiança é respaldada pelas métricas previamente obtidas nos testes.
-
-## 6. Considerações de Teste, Desempenho e Escalabilidade
-
-- **Polifonia máxima:** o sistema de áudio tem desempenho garantido para até 4 notas simultâneas. Para peças mais densas, pode-se adicionar um modelo baseado em NMF (Non-negative Matrix Factorization), mas isso aumentaria significativamente a carga computacional. O MIDI naturalmente não sofre essa limitação.
-- **Latência de análise:** todo o processamento por quadro deve manter-se abaixo do tempo real (~32 ms por quadro), viável com FFI e código C++ otimizado.
-- **Validação robusta:** o protocolo experimental inclui peças monofônicas e polifônicas de dificuldade progressiva, medindo a degradação do algoritmo com o aumento da complexidade, sempre usando o MIDI como referência absoluta.
-
-## 7. Conclusão
-
-Esta arquitetura separa claramente as responsabilidades, maximiza o valor científico ao incorporar um padrão ouro de validação e fornece os artefatos esperados de uma aplicação profissional de transcrição musical. O design é modular, testável e apto a evoluir — desde um protótipo de TCC até um produto funcional. Cada decisão foi fundamentada em requisitos objetivos de desempenho, viabilidade de implementação e rigor acadêmico.
+Distribuído sob a licença do repositório (ver [`LICENSE`](LICENSE)). O histórico da concepção inicial do projeto está em [`docs/historico-concepcao.md`](docs/historico-concepcao.md).

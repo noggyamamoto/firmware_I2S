@@ -18,6 +18,7 @@
 #include "config.h"
 #include "dsp.h"
 #include "hal_console.h"
+#include "hal_net.h"
 #include "hal_storage.h"
 #include "hal_system.h"
 #include "hal_wifi.h"
@@ -52,8 +53,12 @@ static void print_status(void) {
     hal_console_printf("Wi-Fi:             %s%s, IP %s, RSSI %d dBm\n",
                 hal_wifi_is_connected() ? "conectado" : "desconectado",
                 hal_wifi_ap_active() ? " (rede própria ativa)" : "", ip, hal_wifi_rssi());
-    hal_console_printf("App pareado:       %s\n",
-                app_state_is_paired() ? app_state_peer_name() : "nenhum");
+    NetPeer peer;
+    char where[40] = "";
+    if (app_state_get_peer(&peer)) hal_net_peer_str(&peer, where, sizeof(where));
+    hal_console_printf("App pareado:       %s%s%s%s\n",
+                       app_state_is_paired() ? app_state_peer_name() : "nenhum",
+                       where[0] ? " (" : "", where, where[0] ? ")" : "");
     hal_console_printf("Sessão:            %s%s\n", s.active ? "ATIVA" : "PARADA",
                 s.active && s.local ? " (local)" : "");
     hal_console_printf("Flags:             0x%02x (som=%d luz=%d áudio=%d altura=%d)\n",
