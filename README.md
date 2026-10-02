@@ -62,7 +62,7 @@ flowchart LR
 | **RFE04** – Captação digital e filtragem | INMP441 via I2S (24 bits em slots de 32 bits) + passa-banda 70 Hz – 2,5 kHz | `drv_i2s_mic`, `hal_audio`, `dsp` |
 | **RFE05** – Processamento digital de sinais | Altura pelo algoritmo **YIN** + segmentação em notas (ataque, soltura, duração) | `dsp`, `note_tracker`, `audio_pipeline` |
 | **RFE06** – Transmissão de dados | Pacotes binários com sequência e timestamp, por UDP ou WebSocket | `link_service`, `hal_net` |
-| **RNFE01** – Baixa latência | Janelas de 16 ms; tempo de processamento medido (menu serial, opção 3) | `audio_pipeline` |
+| **RNFE01** – Baixa latência | Janelas de 16 ms; tempo de processamento medido (menu serial, Status do sistema); notas com prioridade sobre os fluxos de diagnóstico | `audio_pipeline`, `app_state` |
 | **RNFE02** – Calibração de timbre | Faixa de altura e limiares ajustados para teclado digital (`config.h`) | `config.h`, `note_tracker` |
 | **RNFE03** – Imunidade a ruído | Passa-banda + piso de ruído adaptativo + limiar mínimo + máscara do clique | `dsp`, `note_tracker` |
 | **RNFE04** – Tolerância temporal | Quantização dos tempos em 10 ms | `note_tracker` |
@@ -156,15 +156,17 @@ MicroDetection/
 │   ├── note_tracker.c        # segmentação em notas (ataque, soltura, reataque, quantização)
 │   ├── metronome.c           # metrônomo sonoro/visual com contagem de entrada
 │   ├── link_service.c        # protocolo com o app (comandos, respostas e eventos)
-│   ├── serial_ui.c           # menu serial de diagnóstico e configuração
+│   ├── serial_ui.c           # menu serial navegável (vermelho/branco), único conteúdo do terminal
+│   ├── diagnostics.c         # problemas atuais explicados ao usuário (o que houve / o que fazer)
+│   ├── ui_events.c           # avisos exibidos dentro do menu (app conectado, Wi-Fi caiu...)
 │   └── circular_buffer.c     # buffer circular de quadros brutos (modo diagnóstico)
 ├── hal/                      # camada de abstração de hardware
 │   ├── hal_audio.c           # amostras float normalizadas + instante de cada bloco
 │   ├── hal_indicators.c      # LED de status, LED RGB e buzzer
-│   ├── hal_wifi.c            # conexão com novas tentativas e rede própria de reserva
+│   ├── hal_wifi.c            # conexão com backoff, rede própria de reserva e causa das falhas
 │   ├── hal_net.c             # transporte de pacotes: UDP e WebSocket
 │   ├── hal_storage.c         # credenciais do Wi-Fi na memória não volátil
-│   ├── hal_console.c         # console de texto (printf e leitura de linha)
+│   ├── hal_console.c         # terminal do menu + histórico do ESP_LOG (log técnico)
 │   ├── hal_time.c            # relógio monotônico e temporizadores
 │   └── hal_system.c          # reinício e memória livre
 ├── drivers/                  # controle direto de hardware
@@ -200,7 +202,7 @@ MicroDetection/
 | `drv_i2s_mic` | Canal I2S mestre RX (Philips, 32 bits, mono esquerdo) com DMA | `drv_i2s_mic_init`, `drv_i2s_mic_start`, `drv_i2s_mic_read` |
 | `drv_uart` | UART0 do monitor serial | `drv_uart_init`, `drv_uart_write`, `drv_uart_read_byte` |
 | `drv_nvs` | Leitura e escrita de strings na NVS | `drv_nvs_init`, `drv_nvs_get_str`, `drv_nvs_set_str` |
-| `drv_wifi` | Rádio Wi-Fi e eventos (STA, AP, IP, varredura) | `drv_wifi_init`, `drv_wifi_connect`, `drv_wifi_enable_ap`, `drv_wifi_scan` |
+| `drv_wifi` | Rádio Wi-Fi e eventos (STA, AP, IP, varredura com segurança da rede); país BR, WPA2/WPA3 (SAE H2E), PMF opcional, 20 MHz | `drv_wifi_init`, `drv_wifi_connect`, `drv_wifi_enable_ap`, `drv_wifi_scan` |
 
 #### hal/
 
@@ -208,10 +210,10 @@ MicroDetection/
 |---|---|---|
 | `hal_audio` | Áudio em `float` [-1, 1) com ganho e carimbo de tempo | `hal_audio_read`, `hal_audio_next_sample_time_us` |
 | `hal_indicators` | Padrões do LED de status, flash do LED RGB, bipe | `hal_status_led_set`, `hal_rgb_flash`, `hal_buzzer_beep` |
-| `hal_wifi` | Política de conexão (tentativas, AP de reserva, estado) | `hal_wifi_start`, `hal_wifi_reconnect`, `hal_wifi_state` |
+| `hal_wifi` | Política de conexão (tentativas com backoff, AP de reserva, estado) e classificação das falhas (senha, rede inexistente, sinal, segurança, DHCP) | `hal_wifi_start`, `hal_wifi_reconnect`, `hal_wifi_get_diag`, `hal_wifi_scan` |
 | `hal_net` | Datagramas por UDP e WebSocket com endereço único (`NetPeer`) | `hal_net_init`, `hal_net_send`, `hal_net_peer_equal` |
 | `hal_storage` | Credenciais do Wi-Fi | `hal_storage_load_wifi`, `hal_storage_save_wifi` |
-| `hal_console` | Texto no monitor serial | `hal_console_printf`, `hal_console_readline` |
+| `hal_console` | Terminal do menu; desvia o ESP_LOG para um histórico em memória | `hal_console_write`, `hal_console_read_byte`, `hal_console_capture_logs`, `hal_console_log_lines` |
 | `hal_time` | Relógio e temporizadores | `hal_time_us`, `hal_timer_create`, `hal_timer_start_once` |
 | `hal_system` | Sistema | `hal_system_restart`, `hal_system_free_heap` |
 
@@ -220,14 +222,16 @@ MicroDetection/
 | Módulo | Função |
 |---|---|
 | `main` | Inicializa as camadas em ordem, trata falhas críticas e cria as tarefas |
-| `app_state` | Estado compartilhado: app pareado, sessão, flags, métricas, fila de saída e padrão do LED de status |
-| `audio_pipeline` | Tarefa produtora: lê o microfone, filtra, estima altura, segmenta notas e publica eventos |
+| `app_state` | Estado compartilhado (spinlock): app pareado, sessão (com `session_id`), flags, métricas, filas de saída com prioridade e padrão do LED de status |
+| `audio_pipeline` | Tarefa produtora: lê o microfone, filtra, estima altura, segmenta notas, publica eventos e verifica o microfone (sem sinal, erro de I2S, saturação) |
 | `dsp` | Passa-banda (cascata de biquads RBJ), nível RMS em dBFS, detector de altura YIN |
 | `note_tracker` | Máquina de estados de notas (ver 5.3), piso de ruído adaptativo, reataque, quantização |
-| `metronome` | Batidas em instantes absolutos (sem deriva), contagem de entrada, som e luz, troca de BPM |
+| `metronome` | Batidas em instantes absolutos (sem deriva), contagem de entrada, som e luz, troca de BPM em uma batida exata |
 | `link_service` | Interpreta os comandos do app e monta/envia os pacotes de resposta e de eventos |
-| `serial_ui` | Menu serial: captura local, status, Wi-Fi, metrônomo de teste, afinador |
-| `circular_buffer` | Buffer circular protegido por mutex para quadros de áudio bruto (diagnóstico) |
+| `serial_ui` | Menu serial navegável: status, Wi-Fi (lista de redes, senha, detalhes), captura local, monitor de notas, afinador, metrônomo de teste, log técnico |
+| `diagnostics` | Converte o estado do Wi-Fi, do microfone e do enlace em problemas com "o que fazer" |
+| `ui_events` | Avisos recentes exibidos no menu (não bloqueante, chamado de qualquer tarefa) |
+| `circular_buffer` | Buffer circular SPSC sem cópia (spinlock só no contador) para quadros de áudio bruto (diagnóstico) |
 
 ### 4.4 Diagrama de classes (módulos)
 
@@ -240,18 +244,21 @@ classDiagram
     class main {
         <<app>>
         +app_main()
-        -fatal(msg)
+        -fatal(what, action)
         -on_wifi_state(state)
     }
     class app_state {
         <<app>>
         -NetPeer peer
         -SessionInfo session
-        -QueueHandle_t queue
+        -QueueHandle_t queue_ctrl
+        -QueueHandle_t queue_stream
+        -portMUX_TYPE lock
         +app_state_set_peer(peer, name)
-        +app_state_session_start(bpm, beats, countIn, flags, local)
+        +app_state_session_start(bpm, beats, countIn, flags, local, sessionId) bool
         +app_state_session_stop()
         +app_state_post(OutEvent) bool
+        +app_state_next_event(out, wait) bool
         +app_state_refresh_status_led()
     }
     class audio_pipeline {
@@ -262,6 +269,7 @@ classDiagram
         +audio_pipeline_init() bool
         +audio_pipeline_start_task()
         +audio_pipeline_mask_click(untilMs, hz)
+        +audio_pipeline_mic_status() MicStatus
     }
     class dsp {
         <<app>>
@@ -281,8 +289,8 @@ classDiagram
     class metronome {
         <<app>>
         -HalTimer timer
-        +metronome_start(bpm, beats, countIn, flags, t0)
-        +metronome_set_tempo(bpm)
+        +metronome_start(bpm, beats, countIn, flags, t0, sessionId)
+        +metronome_set_tempo(bpm, atBeat)
         +metronome_stop()
     }
     class link_service {
@@ -294,7 +302,19 @@ classDiagram
     }
     class serial_ui {
         <<app>>
+        +serial_ui_splash()
+        +serial_ui_fatal(what, action)
         +serial_ui_start_task()
+    }
+    class diagnostics {
+        <<app>>
+        +diagnostics_collect(out, max) int
+        +diagnostics_wifi_error_text(diag, buf, len)
+    }
+    class ui_events {
+        <<app>>
+        +ui_event(level, fmt)
+        +ui_events_recent(out, max) int
     }
     class OutEvent {
         <<struct>>
@@ -321,7 +341,8 @@ classDiagram
         +hal_wifi_start(cred, onState) bool
         +hal_wifi_reconnect(cred)
         +hal_wifi_state() HalWifiState
-        +hal_wifi_scan(print) int
+        +hal_wifi_get_diag(out)
+        +hal_wifi_scan(out, max) int
     }
     class hal_net {
         <<hal>>
@@ -343,8 +364,10 @@ classDiagram
     }
     class hal_console {
         <<hal>>
-        +hal_console_printf(fmt)
-        +hal_console_readline(out, max, timeout, echo) int
+        +hal_console_write(text)
+        +hal_console_read_byte(out, timeout) bool
+        +hal_console_capture_logs()
+        +hal_console_log_lines(out, max) int
     }
     class hal_time {
         <<hal>>
@@ -397,16 +420,22 @@ classDiagram
     metronome ..> hal_indicators
     metronome ..> app_state : publica BEAT
     metronome ..> audio_pipeline : máscara do clique
-    link_service ..> app_state : consome a fila
+    link_service ..> app_state : consome as filas
     link_service ..> hal_net
     link_service ..> metronome
     app_state ..> hal_indicators
     app_state ..> hal_wifi
     app_state "1" o-- "0..1" NetPeer : app pareado
-    app_state "1" o-- "*" OutEvent : fila de saída
+    app_state "1" o-- "*" OutEvent : filas de saída
     serial_ui ..> hal_console
     serial_ui ..> hal_storage
     serial_ui ..> hal_wifi
+    serial_ui ..> diagnostics
+    serial_ui ..> ui_events
+    diagnostics ..> hal_wifi
+    diagnostics ..> audio_pipeline
+    app_state ..> ui_events
+    link_service ..> ui_events
     hal_audio ..> drv_i2s_mic
     hal_indicators ..> drv_gpio
     hal_indicators ..> drv_pwm
@@ -422,14 +451,24 @@ classDiagram
 | Tarefa | Núcleo | Prioridade | Função |
 |---|---|---|---|
 | `audio_prod` | 1 | 5 | Microfone → DSP → eventos (núcleo exclusivo para não perder amostras) |
-| `net_tx` | 0 | 4 | Consome a fila de saída e envia pacotes (UDP ou WebSocket) |
+| `net_tx` | 0 | 4 | Consome as filas de saída e envia pacotes (UDP ou WebSocket) |
 | `net_rx` | 0 | 3 | Recebe comandos UDP |
 | `httpd` | 0 | 5 (padrão) | Servidor WebSocket do app web |
-| `esp_timer` | 0 | 22 | Batidas do metrônomo, desligamento do LED/buzzer, monitor de PING |
+| `esp_timer` | 0 | 22 | Batidas do metrônomo, desligamento do LED/buzzer, monitor de PING, tentativas de Wi-Fi |
 | `ui_task` | 0 | 1 | Menu serial |
 | `status_led` | 0 | 1 | Animação do LED de status |
 
-A comunicação entre tarefas usa uma **fila FreeRTOS** (`OutEvent`, 32 posições) como único caminho de saída para a rede; o estado compartilhado (`app_state`) é protegido por **mutex**; a máscara do clique do metrônomo usa **seção crítica**.
+#### Sincronização (análise e escolhas)
+
+| Recurso compartilhado | Quem acessa | Mecanismo | Por quê |
+|---|---|---|---|
+| `app_state` (sessão, app pareado, flags, contadores) | áudio (a cada 16 ms), rede, menu e **callbacks de timer** (metrônomo, watchdog do PING) | **spinlock** (`portMUX`) | As seções críticas só copiam poucos bytes. Com o **mutex** do MVP, a tarefa de áudio (prioridade 5, núcleo 1) podia ficar bloqueada esperando uma tarefa de prioridade menor no núcleo 0 – que por sua vez pode ser preemptada pelo Wi-Fi (prioridade 23) – e os callbacks do `esp_timer` não devem bloquear. O spinlock não bloqueia, não troca de contexto e não sofre inversão de prioridade. |
+| Saída para a rede | áudio, metrônomo, recepção UDP/WebSocket → `net_tx` | **duas filas FreeRTOS** + **notificação de tarefa** | Fila *prioritária* (32: respostas, `NOTE_ON/OFF`, `BEAT`) e fila de *fluxo* (16: `PITCH`, áudio bruto). Produtores usam timeout 0 (nunca bloqueiam); o consumidor dorme em `ulTaskNotifyTake` e sempre esvazia a fila prioritária primeiro. Assim o fluxo de diagnóstico nunca atrasa nem descarta uma nota. Perdas são contadas separadamente. |
+| Buffer circular de áudio bruto (4 quadros) | áudio (escreve) → `net_tx` (lê) | **SPSC sem cópia** + spinlock só no contador | O produtor escreve no slot da cauda e o consumidor envia direto do slot da cabeça (o cabeçalho do pacote fica no próprio slot): sem `memcpy` de 2 KB dentro de uma seção crítica e sem bloqueio. Buffer cheio descarta o quadro novo (o slot em transmissão nunca é sobrescrito). Quadros de uma sessão anterior são descartados pelo número de geração. |
+| Máscara do clique, últimas notas, avisos do menu, log técnico | várias tarefas | spinlock | Dados pequenos, escritos e lidos em poucas instruções. |
+| Envio por WebSocket | `net_tx` | `send_wait_timeout` = 1 s | O padrão (5 s) podia prender a transmissão com um cliente lento e encher as filas. |
+
+O único ponto em que uma tarefa bloqueia esperando outra é o **consumidor** (`net_tx`) aguardando eventos – o comportamento desejado. A tarefa de áudio só bloqueia na leitura do I2S (DMA), que é o seu relógio.
 
 ```mermaid
 flowchart LR
@@ -443,13 +482,17 @@ flowchart LR
         WS["httpd (WebSocket)"]
         UI["ui_task"]
     end
-    AP -- "NOTE_ON/OFF, PITCH" --> Q[("Fila OutEvent")]
-    TM -- BEAT --> Q
-    RX -- "ANNOUNCE, ACK, PONG" --> Q
-    WS -- "ANNOUNCE, ACK, PONG" --> Q
-    Q --> TX
+    AP -- "NOTE_ON/OFF" --> QC[("Fila prioritária")]
+    AP -- "PITCH, áudio bruto" --> QS[("Fila de fluxo")]
+    AP -- "quadros (sem cópia)" --> CB[("Buffer circular")]
+    TM -- BEAT --> QC
+    RX -- "ANNOUNCE, ACK, PONG" --> QC
+    WS -- "ANNOUNCE, ACK, PONG" --> QC
+    QC -- "1º" --> TX
+    QS -- "2º" --> TX
+    CB --> TX
     TX -- pacotes --> NET(("UDP / WebSocket"))
-    RX -. "comandos" .-> S[["app_state (mutex)"]]
+    RX -. "comandos" .-> S[["app_state (spinlock)"]]
     WS -. "comandos" .-> S
     UI -. "sessão local" .-> S
     S -. "sessão ativa, t0" .-> AP
@@ -524,8 +567,8 @@ stateDiagram-v2
     Varredura --> RedePropria: nenhuma rede configurada
     Varredura --> Conectando: credenciais na NVS
     Conectando --> Conectado: IP recebido
-    Conectando --> Conectando: falha (até 8 tentativas)
-    Conectando --> RedePropria: tentativas esgotadas
+    Conectando --> Conectando: falha (backoff 1 s, 2 s... até 5 s)
+    Conectando --> RedePropria: 3 tentativas (senha incorreta, rede inexistente)<br/>ou 8 tentativas (demais causas)
     RedePropria --> Conectado: nova tentativa a cada 15 s
     Conectado --> Conectando: conexão perdida
     Conectado --> Pareado: CONNECT do app
@@ -558,25 +601,26 @@ sequenceDiagram
         App->>Servico: PING
         Servico-->>App: PONG (estado, RSSI, piso de ruído)
     end
-    App->>Servico: SESSION_START (BPM, compasso, 2 compassos de contagem)
+    App->>Servico: SESSION_START (BPM, compasso, 2 compassos de contagem, session_id)
     Servico->>State: session_start() — t0 = agora
+    Note over App,State: um SESSION_START repetido (mesmo session_id) é ignorado:<br/>o relógio não é zerado de novo
     State->>Metro: metronome_start(t0)
     loop cada batida
-        Metro-->>App: BEAT (contagem / compasso)
+        Metro-->>App: BEAT (contagem / compasso, BPM, session_id)
     end
     loop cada nota tocada
         Audio-->>App: NOTE_ON (MIDI, Hz, confiança)
         Audio-->>App: NOTE_OFF (duração)
     end
-    App->>Servico: SET_TEMPO (redução de BPM – RFA09)
-    Servico->>Metro: metronome_set_tempo()
+    App->>Servico: SET_TEMPO (novo BPM, at_beat = batida do início da frase – RFA09)
+    Servico->>Metro: metronome_set_tempo(bpm, at_beat)
     App->>Servico: SESSION_STOP / DISCONNECT
     Servico->>State: session_stop() / clear_peer()
 ```
 
 ### 5.6 Metrônomo
 
-As batidas são agendadas em **instantes absolutos** a partir de `t0` (início da sessão), evitando deriva acumulada. Durante os compassos de contagem, som e luz são sempre acionados (aviso de preparação – RFA05/RU07); depois, seguem as opções do app. A cada clique, o pipeline de áudio recebe uma máscara para não confundir o som do buzzer com uma nota.
+As batidas são agendadas em **instantes absolutos** a partir de `t0` (início da sessão), evitando deriva acumulada. O app calcula a sua linha do tempo com **o mesmo BPM inteiro** enviado ao metrônomo e alinha o relógio pelas batidas recebidas; a troca de andamento acontece na batida `at_beat` informada pelo app (início exato da frase), e não "na próxima batida após o pacote chegar". Durante os compassos de contagem, som e luz são sempre acionados (aviso de preparação – RFA05/RU07); depois, seguem as opções do app. A cada clique, o pipeline de áudio recebe uma máscara para não confundir o som do buzzer com uma nota.
 
 ---
 
@@ -610,9 +654,9 @@ Definido em [`include/protocol.h`](MicroDetection/include/protocol.h) e espelhad
 | `0x03` | `DISCONNECT` | — |
 | `0x04` | `PING` | — (a cada 1 s) |
 | `0x05` | `CONFIG` | BPM, tempos por compasso, flags |
-| `0x06` | `SESSION_START` | BPM, tempos por compasso, compassos de contagem, flags |
+| `0x06` | `SESSION_START` | BPM, tempos por compasso, compassos de contagem, flags, `session_id` (reenvio com o mesmo id é ignorado) |
 | `0x07` | `SESSION_STOP` | — |
-| `0x08` | `SET_TEMPO` | novo BPM (vale a partir da próxima batida) |
+| `0x08` | `SET_TEMPO` | novo BPM e `at_beat`: índice da batida (contagem incluída) em que o novo BPM começa; 0 = próxima batida |
 
 | Código | Dispositivo → app | Conteúdo |
 |---|---|---|
@@ -622,10 +666,12 @@ Definido em [`include/protocol.h`](MicroDetection/include/protocol.h) e espelhad
 | `0x84` | `NOTE_ON` | nota MIDI, frequência, nível, confiança |
 | `0x85` | `NOTE_OFF` | nota MIDI, duração, frequência média |
 | `0x86` | `PITCH` | frequência contínua (afinador, opcional) |
-| `0x87` | `BEAT` | tempo no compasso, contagem, índice do compasso, BPM |
+| `0x87` | `BEAT` | tempo no compasso, contagem, índice do compasso, BPM, `session_id` |
 | `0x88` | `AUDIO_FRAME` | 1024 amostras PCM 16 bits + energia (diagnóstico) |
 
 Flags (`CONFIG`/`SESSION_START`): `0x01` metrônomo sonoro · `0x02` metrônomo visual · `0x04` áudio bruto · `0x08` altura contínua.
+
+Os campos `session_id` e `at_beat` ocupam bytes que eram reservados (zero), então apps e firmwares anteriores continuam compatíveis.
 
 Regras: somente o app pareado controla a sessão; outro app só assume o dispositivo se o anterior ficar 5 s sem enviar `PING` (RU02); `DISCONNECT` libera o dispositivo imediatamente (RU17).
 
@@ -647,10 +693,16 @@ Principais parâmetros de [`include/config.h`](MicroDetection/include/config.h):
 | | `STABLE_HOPS` / `MIN_NOTE_MS` | 2 / 60 | Confirmação da altura e duração mínima |
 | | `QUANTIZE_MS` | 10 | Quantização temporal (RNFE04) |
 | | `CLICK_MASK_MS` | 45 | Máscara do clique do metrônomo |
-| Rede | `WIFI_MAX_RETRIES` | 8 | Tentativas antes da rede própria |
+| Rede | `WIFI_MAX_RETRIES` / `WIFI_FATAL_RETRIES` | 8 / 3 | Tentativas antes da rede própria (3 quando a causa não se resolve sozinha: senha incorreta, rede inexistente) |
+| | `WIFI_COUNTRY_CODE` | `BR` | Canais 1–13 (modems nos canais 12 e 13) |
+| | `WIFI_DHCP_TIMEOUT_MS` | 12000 | Associado, mas sem IP: falha "DHCP" |
 | | `WIFI_AP_PASS` / `WIFI_AP_CHANNEL` | `partitura123` / 6 | Rede própria |
 | | `WS_PORT` | 80 | Servidor WebSocket |
 | | `SESSION_TIMEOUT_MS` | 5000 | Tempo sem `PING` para liberar o dispositivo |
+| | `EVENT_QUEUE_LENGTH` / `STREAM_QUEUE_LENGTH` | 32 / 16 | Fila prioritária (notas, batidas) e de fluxo (altura, áudio bruto) |
+| | `WS_SEND_TIMEOUT_S` | 1 | Tempo máximo de um envio por WebSocket |
+| Menu | `SERIAL_UI_ANSI` | 1 | Cores e cursor ANSI; 0 para terminais sem ANSI (ex.: IDE Arduino) |
+| | `SERIAL_UI_IDLE_RESET_MS` | 20000 | Sem tecla por 20 s após uma interação, o menu volta ao início |
 
 As opções do ESP-IDF necessárias (suporte a WebSocket no `esp_http_server`) estão em `sdkconfig.defaults`.
 
@@ -682,7 +734,7 @@ docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.5.3 \
     idf.py -B build-esp32 -DSDKCONFIG=/project/sdkconfig.esp32doit-devkit-v1 build
 ```
 
-> Validação desta versão: compilação sem avisos com ESP-IDF 5.5.3 para **ESP32** (`MicroDetection.bin` ≈ 860 KB, 16% livre na partição) e **ESP32-S3** (≈ 852 KB, 17% livre).
+> Validação desta versão (1.1.0): compilação sem avisos com ESP-IDF 5.5.3 para **ESP32** (`MicroDetection.bin` ≈ 882 KB, 14% livre na partição) e **ESP32-S3** (≈ 874 KB, 15% livre).
 
 ---
 
@@ -690,9 +742,18 @@ docker run --rm -v "$PWD":/project -w /project espressif/idf:v5.5.3 \
 
 ### 9.1 Wi-Fi
 
-Na primeira execução não há rede configurada: o dispositivo cria a rede **PartituraIoT-XXXX** (senha `partitura123`, IP `192.168.4.1`). Para usar a rede da escola/casa, abra o monitor serial e escolha **5 – Configurar rede Wi-Fi**; as credenciais ficam salvas na NVS. O app precisa estar na mesma rede do dispositivo.
+Na primeira execução não há rede configurada: o dispositivo cria a rede **PartituraIoT-XXXX** (senha `partitura123`, IP `192.168.4.1`). Para usar a rede da escola/casa, abra o monitor serial e escolha **2 – Rede Wi-Fi › 1 – Escolher rede da lista**, selecione a rede com as setas e digite a senha (TAB mostra o que foi digitado); as credenciais ficam salvas na NVS. O app precisa estar na mesma rede do dispositivo.
 
-No **app web**, a busca automática por broadcast não existe: informe o IP do dispositivo (exibido na opção 3 do menu serial) ou conecte o computador à rede própria do dispositivo e use `192.168.4.1`. Abra o app web por `http://` (páginas `https://` não podem abrir conexões `ws://` sem criptografia).
+Compatibilidade com modems domésticos (corrigida nesta versão):
+
+- **WPA3 / WPA2-WPA3**: o SAE agora aceita os dois métodos (hunt-and-peck e hash-to-element). Antes a configuração zerada usava só o primeiro, recusado por modems Wi-Fi 6 em WPA3 – enquanto o roteador do celular (WPA2) funcionava;
+- **canais 12 e 13**: país `BR` configurado (antes, modo mundial com canais 1–11 ativos);
+- **PMF (802.11w)** opcional e canal de **20 MHz**;
+- SSID de 32 caracteres e chave hexadecimal de 64 dígitos aceitos.
+
+Se ainda assim não conectar, o menu mostra a causa (senha incorreta, rede não encontrada, rede de 5 GHz, sinal fraco, segurança incompatível, modem recusou – filtro de MAC –, sem IP do DHCP) e o que fazer.
+
+No **app web**, a busca automática por broadcast não existe: informe o IP do dispositivo (exibido no topo do menu serial) ou conecte o computador à rede própria do dispositivo e use `192.168.4.1`. Abra o app web por `http://` (páginas `https://` não podem abrir conexões `ws://` sem criptografia).
 
 ### 9.2 LED de status
 
@@ -706,19 +767,47 @@ No **app web**, a busca automática por broadcast não existe: informe o IP do d
 
 ### 9.3 Menu serial (115200 bps)
 
+O terminal mostra **somente o menu** (as mensagens técnicas do ESP_LOG vão para *Log técnico*). A tela é redesenhada no lugar, em vermelho e branco: no topo, o estado do Wi-Fi, do app, do microfone e da sessão; abaixo, os **problemas atuais com o que fazer** e os últimos avisos; por fim, as opções.
+
 ```
-1 - Iniciar captura local (teste sem o app)
-2 - Parar captura
-3 - Status
-4 - Escanear redes Wi-Fi
-5 - Configurar rede Wi-Fi
-6 - Liga/desliga envio de áudio bruto (diagnóstico)
-7 - Testar metrônomo (2 compassos)
-8 - Afinador (5 s de leitura contínua)
-9 - Reiniciar dispositivo
+  PARTITURA IoT  ·  firmware 1.1.0  ·  PartituraIoT-B2C3
+ Wi-Fi   conectando a "CasaDoAluno"...
+ App     aguardando conexão
+ Mic     OK    Sessão  parada
+────────────────────────────────────────────────────────────────────────────
+ ! Senha incorreta para a rede "CasaDoAluno"
+   > Menu 2 > 1: digite a senha de novo (maiúsculas contam; TAB mostra).
+   > Se a senha estiver certa, reinicie o modem e use o Menu 2 > 3.
+   > Modem em "somente WPA3"? Troque para "WPA2/WPA3" ou "WPA2".
+────────────────────────────────────────────────────────────────────────────
+ MENU PRINCIPAL
+  ▸ 1  Status do sistema
+    2  Rede Wi-Fi  ›
+    3  Captura e áudio  ›
+    4  Log técnico
+    5  Reiniciar dispositivo
+
+ ↑/↓ mover · ENTER escolher · 1-5 atalho
+ Sem tecla por 20 s, o menu volta ao início.
 ```
 
-A opção **3 – Status** mostra rede, IP, app pareado (e se por UDP ou WebSocket), notas detectadas, pacotes enviados, nível de entrada, piso de ruído, tempo de processamento por janela e memória livre.
+| Menu | Opções |
+|---|---|
+| 1 – Status do sistema | IP, sessão, metrônomo, notas detectadas, pacotes e erros, eventos perdidos, buffer, nível de entrada, piso de ruído, tempo de processamento por janela, memória livre (ao vivo) |
+| 2 – Rede Wi-Fi | 1 Escolher rede da lista · 2 Digitar o nome (rede oculta) · 3 Tentar conectar de novo · 4 Detalhes da conexão (causa da falha, tentativa, sinal, canal, segurança, MAC) |
+| 3 – Captura e áudio | 1 Iniciar/parar captura local · 2 Monitor de notas · 3 Afinador e nível do microfone · 4 Testar metrônomo · 5 Envio de áudio bruto |
+| 4 – Log técnico | Últimas linhas do ESP_LOG |
+| 5 – Reiniciar dispositivo | Pede confirmação |
+
+Navegação: **↑/↓** e **ENTER**, ou o número da opção; **ESC**/**←** volta. Depois de qualquer interação, **20 s sem tecla** fazem o menu voltar ao início (o que estava sendo digitado é descartado). Funciona no monitor do PlatformIO (`monitor_filters = direct`), PuTTY, screen e minicom; no Monitor Serial da IDE Arduino (sem ANSI) use `SERIAL_UI_ANSI 0`.
+
+Problemas diagnosticados e explicados no menu:
+
+| Área | Situações |
+|---|---|
+| Wi-Fi | nenhuma rede cadastrada · senha com tamanho inválido · **senha incorreta** · **rede inexistente** (com sugestão de nome parecido e aviso de 5 GHz) · segurança incompatível · sinal fraco · modem recusou (filtro de MAC/limite) · sem IP (DHCP) · conexão caiu · rede própria ativa |
+| Microfone | sem sinal (fios do INMP441, com os pinos da placa) · I2S sem amostras · saturação · falha ao iniciar |
+| App | aguardando conexão (com o IP para "Conectar pelo IP") · app parou de responder · falhas de envio · eventos perdidos por rede lenta |
 
 ---
 
@@ -748,12 +837,13 @@ flutter test --platform chrome --dart-define=WS_DEVICE=true \
 
 | Sintoma | Causa provável | Ação |
 |---|---|---|
-| LED pisca rápido sem parar | Rede ou senha incorretas | Menu serial, opção 5; após 8 tentativas a rede própria é ativada |
-| App não encontra o dispositivo | Redes diferentes ou broadcast bloqueado | Use "Conectar pelo IP" no app (IP na opção 3 do menu) |
+| LED pisca rápido sem parar | Rede ou senha incorretas | O topo do menu serial mostra a causa e o que fazer; Menu 2 › 1 para escolher a rede e digitar a senha |
+| Conecta no roteador do celular, mas não no modem | Modem em WPA3 (H2E), canal 12/13, 5 GHz ou filtro de MAC | Versão 1.1.0 corrige WPA3 e canais; para 5 GHz/filtro, siga o diagnóstico do menu (Menu 2 › 4) |
+| App não encontra o dispositivo | Redes diferentes ou broadcast bloqueado (isolamento de clientes, celular em 5 GHz) | Use "Conectar pelo IP" no app (IP no topo do menu serial) |
 | App web não conecta | Página aberta por `https://` ou IP errado | Abra o app web por `http://` e informe o IP do dispositivo |
-| "Leitura I2S incompleta" no log | Ligações do INMP441 | Confira SCK/WS/SD e L/R em GND |
+| Menu mostra "Microfone sem sinal" | Ligações do INMP441 | Confira SCK/WS/SD, VDD em 3V3 e L/R em GND (o menu mostra os pinos da placa) |
 | Notas falsas com o metrônomo | Buzzer muito próximo do microfone | Afaste o buzzer ou reduza o volume; ajuste `CLICK_MASK_MS` |
-| Notas não detectadas | Nível baixo | Aproxime o microfone ou aumente `INPUT_GAIN`; verifique o piso de ruído na opção 3 |
+| Notas não detectadas | Nível baixo | Aproxime o microfone ou aumente `INPUT_GAIN`; verifique nível e piso de ruído no afinador (Menu 3 › 3) |
 
 ---
 

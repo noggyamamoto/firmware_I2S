@@ -123,6 +123,9 @@ static bool ws_open(void) {
     cfg.server_port = WS_PORT;
     cfg.core_id = 0;                                // Rede no núcleo 0 (áudio no 1)
     cfg.lru_purge_enable = true;
+    // Um cliente WebSocket lento não pode prender a tarefa de transmissão por
+    // 5 s (padrão): enquanto ela espera, as filas de saída enchem
+    cfg.send_wait_timeout = WS_SEND_TIMEOUT_S;
     if (httpd_start(&s_http, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Falha ao iniciar o servidor WebSocket");
         return false;

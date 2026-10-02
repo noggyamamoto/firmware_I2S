@@ -18,14 +18,13 @@
 #include "hal_wifi.h"
 #include "metronome.h"
 #include "protocol.h"
+#include "ui_events.h"
 
 static const char *TAG = "link";
 
 static uint32_t s_sequence = 0;                 // Usado apenas pela tarefa de transmissão
 static HalTimer s_watchdog = NULL;              // Verifica o PING do app a cada 1 s
-
-// Buffer do maior pacote: quadro de áudio bruto
-static uint8_t s_tx_buf[sizeof(PktAudioFrameHeader) + BLOCK_SAMPLES * sizeof(int16_t)];
+static volatile uint32_t s_timeouts = 0;        // Vezes em que o app parou de responder
 
 static void fill_header(PacketHeader *h, uint8_t type, uint32_t timestamp_ms) {
     h->magic = PROTO_MAGIC;
@@ -48,9 +47,10 @@ static bool send_to(const NetPeer *dest, const void *data, size_t len) {
 static void tx_task(void *arg) {
     (void)arg;
     OutEvent ev;
-    AudioFrame frame;
+    app_state_set_consumer(xTaskGetCurrentTaskHandle());   // Antes de esvaziar as filas
     while (1) {
-        if (xQueueReceive(app_state_queue(), &ev, portMAX_DELAY) != pdTRUE) continue;
+        // Bloqueio só aqui (consumidor), sem prazo: acorda a cada evento publicado
+        if (!app_state_next_event(&ev, portMAX_DELAY)) continue;
 
         NetPeer dest;
         if (ev.has_dest) {
@@ -124,19 +124,23 @@ static void tx_task(void *arg) {
                 p.count_in = ev.u.beat.count_in;
                 p.bar_index = ev.u.beat.bar_index;
                 p.bpm = ev.u.beat.bpm;
+                p.session_id = ev.u.beat.session_id;
                 send_to(&dest, &p, sizeof(p));
                 break;
             }
             case OUT_AUDIO_READY: {
-                // Empacota o quadro bruto: cabeçalho + amostras PCM de 16 bits
-                while (circ_buffer_pop(app_state_audio_buffer(), &frame)) {
-                    PktAudioFrameHeader *h = (PktAudioFrameHeader *)s_tx_buf;
-                    fill_header(&h->h, PKT_AUDIO_FRAME, frame.timestamp_ms);
-                    h->num_samples = frame.num_samples;
-                    h->energy = frame.energy;
-                    size_t bytes = frame.num_samples * sizeof(int16_t);
-                    memcpy(s_tx_buf + sizeof(*h), frame.samples, bytes);
-                    send_to(&dest, s_tx_buf, sizeof(*h) + bytes);
+                // O slot já tem o formato do pacote (cabeçalho + PCM 16 bits):
+                // completa o cabeçalho e envia direto do buffer circular
+                CircularBuffer *cb = app_state_audio_buffer();
+                uint32_t generation = app_state_session().generation;
+                AudioFrame *frame;
+                while ((frame = circ_buffer_read_slot(cb)) != NULL) {
+                    if (frame->generation == generation) {      // Descarta sessão anterior
+                        PktAudioFrameHeader *h = &frame->packet;
+                        fill_header(&h->h, PKT_AUDIO_FRAME, h->h.timestamp_ms);
+                        send_to(&dest, h, sizeof(*h) + h->num_samples * sizeof(int16_t));
+                    }
+                    circ_buffer_release(cb);
                 }
                 break;
             }
@@ -209,7 +213,8 @@ static void handle_packet(const NetPeer *from, const uint8_t *buf, size_t size) 
         case PKT_SESSION_START: {
             if (!from_peer || len < (int)sizeof(PktSessionStart)) return;
             const PktSessionStart *p = (const PktSessionStart *)buf;
-            app_state_session_start(p->bpm, p->beats_per_bar, p->count_in_bars, p->flags, false);
+            app_state_session_start(p->bpm, p->beats_per_bar, p->count_in_bars, p->flags, false,
+                                    p->session_id);
             break;
         }
 
@@ -220,7 +225,7 @@ static void handle_packet(const NetPeer *from, const uint8_t *buf, size_t size) 
         case PKT_SET_TEMPO: {
             if (!from_peer || len < (int)sizeof(PktSetTempo)) return;
             const PktSetTempo *p = (const PktSetTempo *)buf;
-            metronome_set_tempo(p->bpm);
+            metronome_set_tempo(p->bpm, p->at_beat);
             break;
         }
 
@@ -234,6 +239,9 @@ static void watchdog_cb(void *arg) {
     (void)arg;
     if (app_state_is_paired() && app_state_ms_since_touch() > SESSION_TIMEOUT_MS) {
         ESP_LOGW(TAG, "App sem resposta há %d ms, desconectando", SESSION_TIMEOUT_MS);
+        s_timeouts++;
+        ui_event(UI_EV_WARN, "App parou de responder (%d s sem sinal): pareamento desfeito",
+                 SESSION_TIMEOUT_MS / 1000);
         app_state_clear_peer();
     }
 }
@@ -254,6 +262,7 @@ void link_service_start(void) {
 
 uint32_t link_service_packets_sent(void) { return hal_net_packets_sent(); }
 uint32_t link_service_send_errors(void) { return hal_net_send_errors(); }
+uint32_t link_service_timeouts(void) { return s_timeouts; }
 
 void link_service_deinit(void) {
     if (s_watchdog) hal_timer_stop(s_watchdog);
