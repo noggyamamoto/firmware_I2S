@@ -3,8 +3,8 @@
  * Configurações de hardware, áudio, DSP e rede
  *
  * Os pinos são escolhidos automaticamente conforme o alvo de compilação:
- *  - ESP32 (esp32doit-devkit-v1)
- *  - ESP32-S3 (ESP32-S3-DevKitC-1 N16R8, placa listada no Quadro 9 do TCC)
+ *  - ESP32 (esp32doit-devkit-v1)(testes iniciais)
+ *  - ESP32-S3 (ESP32-S3-DevKitC-1 N16R8, testes com o circuito montado)
  *
  * Ligação do microfone INMP441 (I2S):
  *   INMP441  |  ESP32   | ESP32-S3
@@ -88,8 +88,8 @@
 
 // ======================= REDE ===============================================
 // Credenciais padrão (podem ser alteradas pelo menu serial e ficam salvas na NVS)
-#define WIFI_DEFAULT_SSID       "SSID"                  // Nome da rede Wi-Fi (substituir)
-#define WIFI_DEFAULT_PASS       "SENHA"                 // Senha da rede Wi-Fi
+#define WIFI_DEFAULT_SSID       "JOAO_2.4G"                  // Nome da rede Wi-Fi (substituir)
+#define WIFI_DEFAULT_PASS       "30226280!"                 // Senha da rede Wi-Fi
 #define WIFI_MAX_RETRIES        8                       // Tentativas antes de ativar o modo AP
 #define WIFI_AP_PASS            "partitura123"          // Senha da rede própria (modo AP)
 #define WIFI_AP_CHANNEL         6                       // Canal da rede própria
