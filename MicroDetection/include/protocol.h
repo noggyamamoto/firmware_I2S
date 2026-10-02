@@ -85,21 +85,29 @@ typedef struct {
     uint8_t  flags;                     // CFG_FLAG_*
 } PktConfig;
 
-/* PKT_SESSION_START */
+/* PKT_SESSION_START
+ * session_id identifica a execução: um SESSION_START repetido com o mesmo
+ * id (reenvio por perda de pacote) é ignorado e NÃO zera o relógio de novo,
+ * o que manteria o app e o dispositivo dessincronizados. 0 = sem id. */
 typedef struct {
     PacketHeader h;
     uint16_t bpm;                       // Andamento inicial
     uint8_t  beats_per_bar;             // Fórmula de compasso (numerador)
     uint8_t  count_in_bars;             // Compassos de contagem (RFA05 = 2)
     uint8_t  flags;                     // CFG_FLAG_*
-    uint8_t  reserved[3];
+    uint8_t  session_id;                // Identificador da execução (1..255)
+    uint8_t  reserved[2];
 } PktSessionStart;
 
-/* PKT_SET_TEMPO */
+/* PKT_SET_TEMPO
+ * at_beat = índice da batida (desde o início da sessão, contagem incluída)
+ * a partir da qual o novo andamento vale. Assim a troca acontece exatamente
+ * no início da frase calculado pelo app, mesmo que o pacote chegue antes.
+ * 0 = na próxima batida (comportamento anterior). */
 typedef struct {
     PacketHeader h;
     uint16_t bpm;                       // Novo andamento
-    uint16_t reserved;
+    uint16_t at_beat;                   // Batida em que o novo andamento começa
 } PktSetTempo;
 
 /* PKT_ANNOUNCE */
@@ -165,7 +173,8 @@ typedef struct {
     uint8_t  count_in;                  // 1 durante os compassos de contagem
     uint16_t bar_index;                 // Índice do compasso desde o início
     uint16_t bpm;                       // Andamento vigente
-    uint16_t reserved;
+    uint8_t  session_id;                // Eco do SESSION_START (0 = sessão local)
+    uint8_t  reserved;
 } PktBeat;
 
 /* PKT_AUDIO_FRAME – cabeçalho do quadro bruto, seguido de num_samples int16 */

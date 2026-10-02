@@ -21,12 +21,21 @@
 
 void metronome_init(void);
 
-/** @brief Inicia a primeira batida em `t0_us` (instante zero da sessão). */
+/**
+ * @brief Inicia a primeira batida em `t0_us` (instante zero da sessão).
+ *        `session_id` é ecoado nos pacotes BEAT para o app descartar batidas
+ *        de uma execução anterior.
+ */
 void metronome_start(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in_bars,
-                     uint8_t flags, int64_t t0_us);
+                     uint8_t flags, int64_t t0_us, uint8_t session_id);
 
-/** @brief Altera o andamento a partir da próxima batida. */
-void metronome_set_tempo(uint16_t bpm);
+/**
+ * @brief Altera o andamento a partir da batida `at_beat` (índice desde o
+ *        início da sessão, contagem incluída): o intervalo que começa nessa
+ *        batida já usa o novo BPM. 0 = a partir da próxima batida.
+ *        Se o comando chegar atrasado, vale na próxima batida.
+ */
+void metronome_set_tempo(uint16_t bpm, uint16_t at_beat);
 
 /** @brief Liga/desliga som e luz (CFG_FLAG_METRO_*). */
 void metronome_set_flags(uint8_t flags);

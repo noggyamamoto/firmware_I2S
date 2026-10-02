@@ -5,19 +5,27 @@
  */
 #include "drv_wifi.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_event.h"
+#include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+
+#include "config.h"
+
+static const char *TAG = "drv_wifi";
 
 static drv_wifi_event_cb s_callback = NULL;
 
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg;
     if (!s_callback) return;
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        s_callback(DRV_WIFI_EVENT_STA_CONNECTED, 0);
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *ev = (wifi_event_sta_disconnected_t *)data;
         s_callback(DRV_WIFI_EVENT_STA_DISCONNECTED, ev->reason);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -25,6 +33,8 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         s_callback(DRV_WIFI_EVENT_STA_GOT_IP, ev->ip_info.ip.addr);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         s_callback(DRV_WIFI_EVENT_AP_CLIENT_JOINED, 0);
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        s_callback(DRV_WIFI_EVENT_AP_CLIENT_LEFT, 0);
     }
 }
 
@@ -40,11 +50,19 @@ bool drv_wifi_init(drv_wifi_event_cb callback) {
     if (esp_wifi_init(&init) != ESP_OK) return false;
     esp_wifi_set_ps(WIFI_PS_NONE);                          // Sem economia de energia: menor latência
 
+    // País: sem isto o rádio usa o modo "mundial" (canais 1–11 ativos), e um
+    // modem configurado no canal 12 ou 13 não é encontrado.
+    if (esp_wifi_set_country_code(WIFI_COUNTRY_CODE, true) != ESP_OK) {
+        ESP_LOGW(TAG, "País %s não aplicado", WIFI_COUNTRY_CODE);
+    }
+
     if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL) != ESP_OK ||
         esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, NULL) != ESP_OK) {
         return false;
     }
-    return esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK;
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) return false;
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);      // 20 MHz: mais compatível
+    return true;
 }
 
 bool drv_wifi_start(void) {
@@ -53,10 +71,16 @@ bool drv_wifi_start(void) {
 
 void drv_wifi_set_station(const char *ssid, const char *password) {
     wifi_config_t cfg = {0};
-    strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
-    strncpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password) - 1);
-    cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    // Campos de tamanho fixo (32/64 bytes) sem terminador obrigatório: um SSID
+    // de 32 caracteres ou uma chave de 64 dígitos hexadecimais são válidos
+    strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
+    strncpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password));
+    cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;            // Procura em todos os canais
+    cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;        // Repetidores/mesh: o mais forte
+    cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;            // Aceita qualquer segurança anunciada
+    cfg.sta.pmf_cfg.required = false;                       // PMF quando o roteador oferecer
+    cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;                // WPA3: os dois métodos do SAE (zerado = só
+                                                            // hunt-and-peck, recusado por modems WPA3 H2E)
     esp_wifi_set_config(WIFI_IF_STA, &cfg);
 }
 
@@ -69,6 +93,7 @@ void drv_wifi_enable_ap(const char *ssid, const char *password, uint8_t channel)
     ap.ap.max_connection = 2;
     ap.ap.authmode = strlen(password) >= 8 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
     esp_wifi_set_mode(WIFI_MODE_APSTA);
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
     esp_wifi_set_config(WIFI_IF_AP, &ap);
 }
 
@@ -84,6 +109,23 @@ void drv_wifi_disconnect(void) {
     esp_wifi_disconnect();
 }
 
+static DrvWifiAuth map_auth(wifi_auth_mode_t mode) {
+    switch (mode) {
+        case WIFI_AUTH_OPEN:            return DRV_WIFI_AUTH_OPEN;
+        case WIFI_AUTH_WEP:             return DRV_WIFI_AUTH_WEP;
+        case WIFI_AUTH_WPA_PSK:
+        case WIFI_AUTH_WPA2_PSK:
+        case WIFI_AUTH_WPA_WPA2_PSK:    return DRV_WIFI_AUTH_WPA2;
+        case WIFI_AUTH_WPA3_PSK:        return DRV_WIFI_AUTH_WPA3;
+        case WIFI_AUTH_WPA2_WPA3_PSK:   return DRV_WIFI_AUTH_WPA2_WPA3;
+        case WIFI_AUTH_WPA2_ENTERPRISE:
+        case WIFI_AUTH_WPA3_ENTERPRISE:
+        case WIFI_AUTH_WPA2_WPA3_ENTERPRISE:
+        case WIFI_AUTH_WPA3_ENT_192:    return DRV_WIFI_AUTH_ENTERPRISE;
+        default:                        return DRV_WIFI_AUTH_OTHER;
+    }
+}
+
 int drv_wifi_scan(DrvWifiAp *out, int max) {
     wifi_scan_config_t scan = {0};
     scan.show_hidden = false;
@@ -91,14 +133,28 @@ int drv_wifi_scan(DrvWifiAp *out, int max) {
     uint16_t count = 0;
     esp_wifi_scan_get_ap_num(&count);
     if (count > max) count = max;
-    wifi_ap_record_t records[count > 0 ? count : 1];
-    if (esp_wifi_scan_get_ap_records(&count, records) != ESP_OK) return -1;
+    if (count == 0) {
+        esp_wifi_clear_ap_list();
+        return 0;
+    }
+    // No heap: cada registro tem ~100 bytes e a pilha da tarefa do menu é pequena
+    wifi_ap_record_t *records = calloc(count, sizeof(wifi_ap_record_t));
+    if (!records) {
+        esp_wifi_clear_ap_list();
+        return -1;
+    }
+    if (esp_wifi_scan_get_ap_records(&count, records) != ESP_OK) {
+        free(records);
+        return -1;
+    }
     for (int i = 0; i < count; i++) {
         strncpy(out[i].ssid, (const char *)records[i].ssid, sizeof(out[i].ssid) - 1);
         out[i].ssid[sizeof(out[i].ssid) - 1] = '\0';
         out[i].rssi = records[i].rssi;
         out[i].channel = records[i].primary;
+        out[i].auth = map_auth(records[i].authmode);
     }
+    free(records);
     return count;
 }
 

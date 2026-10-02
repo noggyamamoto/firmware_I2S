@@ -27,6 +27,9 @@ void link_service_start(void);
 uint32_t link_service_packets_sent(void);
 uint32_t link_service_send_errors(void);
 
+/** @brief Quantas vezes o app pareado parou de enviar PING. */
+uint32_t link_service_timeouts(void);
+
 /** @brief Fecha os transportes. */
 void link_service_deinit(void);
 

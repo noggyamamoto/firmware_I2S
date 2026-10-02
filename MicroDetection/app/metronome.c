@@ -29,7 +29,9 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool     s_running = false;
 static bool     s_test = false;             // Modo de teste (sem sessão)
 static uint16_t s_bpm = 100;
-static uint16_t s_pending_bpm = 0;          // Novo BPM aplicado na próxima batida
+static uint16_t s_pending_bpm = 0;          // Novo BPM agendado (0 = nenhum)
+static uint32_t s_pending_at = 0;           // Batida em que o novo BPM começa
+static uint8_t  s_session_id = 0;           // Eco nos pacotes BEAT
 static uint8_t  s_beats_per_bar = 4;
 static uint8_t  s_count_in_bars = 2;
 static uint8_t  s_flags = 0;
@@ -60,15 +62,19 @@ static void beat_cb(void *arg) {
         return;
     }
     uint32_t index = s_beat_index++;
-    uint8_t beats = s_beats_per_bar;
-    uint8_t flags = s_flags;
-    uint16_t bpm = s_bpm;
-    int64_t beat_time = s_next_beat_us;
-    bool test = s_test;
-    if (s_pending_bpm) {                                    // Troca de andamento
+    // Troca de andamento: o intervalo que começa nesta batida já usa o novo BPM
+    if (s_pending_bpm && index >= s_pending_at) {
         s_bpm = s_pending_bpm;
         s_pending_bpm = 0;
     }
+    uint8_t beats = s_beats_per_bar;
+    uint8_t count_in_bars = s_count_in_bars;
+    uint8_t flags = s_flags;
+    uint8_t session_id = s_session_id;
+    uint16_t bpm = s_bpm;
+    int64_t beat_time = s_next_beat_us;
+    int64_t t0 = s_t0_us;
+    bool test = s_test;
     s_next_beat_us += beat_period_us(s_bpm);
     int64_t next = s_next_beat_us;
     if (test && s_test_remaining > 0 && --s_test_remaining == 0) s_running = false;
@@ -77,9 +83,9 @@ static void beat_cb(void *arg) {
 
     uint8_t beat_in_bar = index % beats;
     uint32_t bar = index / beats;
-    bool count_in = bar < s_count_in_bars;
+    bool count_in = bar < count_in_bars;
     bool accent = beat_in_bar == 0;
-    uint32_t t_ms = (uint32_t)((beat_time - s_t0_us) / 1000);
+    uint32_t t_ms = (uint32_t)((beat_time - t0) / 1000);
 
     // Som: sempre durante a contagem (aviso sonoro – RU07), depois conforme a opção
     if ((flags & CFG_FLAG_METRO_SOUND) || count_in) {
@@ -101,6 +107,7 @@ static void beat_cb(void *arg) {
         ev.u.beat.count_in = count_in;
         ev.u.beat.bar_index = (uint16_t)bar;
         ev.u.beat.bpm = bpm;
+        ev.u.beat.session_id = session_id;
         app_state_post(&ev);
     }
 
@@ -117,12 +124,16 @@ void metronome_init(void) {
 }
 
 static void start_internal(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in_bars,
-                           uint8_t flags, int64_t t0_us, bool test, uint32_t test_beats) {
+                           uint8_t flags, int64_t t0_us, bool test, uint32_t test_beats,
+                           uint8_t session_id) {
     hal_timer_stop(s_timer);
     portENTER_CRITICAL(&s_lock);
     s_bpm = bpm ? bpm : 60;
     s_pending_bpm = 0;
-    s_beats_per_bar = (beats_per_bar >= 2 && beats_per_bar <= 12) ? beats_per_bar : 4;
+    s_pending_at = 0;
+    s_session_id = session_id;
+    // Mesmo numerador do app (1 a 12); o app calcula a contagem com ele
+    s_beats_per_bar = (beats_per_bar >= 1 && beats_per_bar <= 12) ? beats_per_bar : 4;
     s_count_in_bars = count_in_bars;
     s_flags = flags;
     s_t0_us = t0_us;
@@ -139,18 +150,21 @@ static void start_internal(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in
 }
 
 void metronome_start(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in_bars,
-                     uint8_t flags, int64_t t0_us) {
-    start_internal(bpm, beats_per_bar, count_in_bars, flags, t0_us, false, 0);
+                     uint8_t flags, int64_t t0_us, uint8_t session_id) {
+    start_internal(bpm, beats_per_bar, count_in_bars, flags, t0_us, false, 0, session_id);
     ESP_LOGI(TAG, "Metrônomo: %u BPM, %u/4, som=%d luz=%d", bpm, beats_per_bar,
              (flags & CFG_FLAG_METRO_SOUND) != 0, (flags & CFG_FLAG_METRO_VISUAL) != 0);
 }
 
-void metronome_set_tempo(uint16_t bpm) {
+void metronome_set_tempo(uint16_t bpm, uint16_t at_beat) {
     if (bpm == 0) return;
     portENTER_CRITICAL(&s_lock);
     s_pending_bpm = bpm;
+    s_pending_at = at_beat;                 // Já passou (ou 0): vale na próxima batida
+    uint32_t next = s_beat_index;
     portEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "Novo andamento na próxima batida: %u BPM", bpm);
+    ESP_LOGI(TAG, "Novo andamento: %u BPM a partir da batida %u (próxima: %lu)", bpm, at_beat,
+             (unsigned long)next);
 }
 
 void metronome_set_flags(uint8_t flags) {
@@ -169,5 +183,5 @@ void metronome_stop(void) {
 
 void metronome_test(uint16_t bpm, uint8_t beats_per_bar) {
     start_internal(bpm, beats_per_bar, 0, CFG_FLAG_METRO_SOUND | CFG_FLAG_METRO_VISUAL,
-                   hal_time_us() + 1000, true, (uint32_t)beats_per_bar * 2);
+                   hal_time_us() + 1000, true, (uint32_t)beats_per_bar * 2, 0);
 }

@@ -8,7 +8,6 @@
 #include <string.h>
 
 #include "esp_log.h"
-#include "freertos/semphr.h"
 
 #include "config.h"
 #include "hal_indicators.h"
@@ -16,11 +15,14 @@
 #include "hal_wifi.h"
 #include "metronome.h"
 #include "protocol.h"
+#include "ui_events.h"
 
 static const char *TAG = "state";
 
-static SemaphoreHandle_t  s_lock;                       // Protege todos os campos abaixo
-static QueueHandle_t      s_queue;                      // Fila de eventos a transmitir
+static portMUX_TYPE       s_lock = portMUX_INITIALIZER_UNLOCKED;   // Protege os campos abaixo
+static QueueHandle_t      s_queue_ctrl;                 // Respostas, notas e batidas
+static QueueHandle_t      s_queue_stream;               // Altura contínua e áudio bruto
+static TaskHandle_t       s_consumer = NULL;            // Tarefa de transmissão
 static CircularBuffer     s_audio_buffer;               // Quadros brutos (diagnóstico)
 
 static bool               s_paired = false;
@@ -32,14 +34,16 @@ static SessionInfo        s_session;
 static uint8_t            s_flags = CFG_FLAG_METRO_SOUND | CFG_FLAG_METRO_VISUAL;
 static float              s_noise_floor_db = -75.0f;
 static uint32_t           s_dropped = 0;
+static uint32_t           s_dropped_stream = 0;
 static uint32_t           s_notes = 0;
 
-#define LOCK()   xSemaphoreTake(s_lock, portMAX_DELAY)
-#define UNLOCK() xSemaphoreGive(s_lock)
+// Spinlock: seções curtíssimas, sem chamadas bloqueantes (ver app_state.h)
+#define LOCK()   portENTER_CRITICAL(&s_lock)
+#define UNLOCK() portEXIT_CRITICAL(&s_lock)
 
 void app_state_init(void) {
-    s_lock = xSemaphoreCreateMutex();
-    s_queue = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(OutEvent));
+    s_queue_ctrl = xQueueCreate(EVENT_QUEUE_LENGTH, sizeof(OutEvent));
+    s_queue_stream = xQueueCreate(STREAM_QUEUE_LENGTH, sizeof(OutEvent));
     circ_buffer_init(&s_audio_buffer);
     memset(&s_session, 0, sizeof(s_session));
 }
@@ -72,6 +76,7 @@ void app_state_set_peer(const NetPeer *peer, const char *app_name) {
     char where[40];
     hal_net_peer_str(peer, where, sizeof(where));
     ESP_LOGI(TAG, "App pareado: %s (%s)", s_peer_name, where);
+    ui_event(UI_EV_OK, "App \"%s\" conectado (%s)", s_peer_name, where);
     app_state_refresh_status_led();
 }
 
@@ -84,6 +89,7 @@ void app_state_clear_peer(void) {
     UNLOCK();
     if (was) {
         ESP_LOGI(TAG, "App desconectado");
+        ui_event(UI_EV_INFO, "App desconectado");
         app_state_refresh_status_led();
     }
 }
@@ -107,21 +113,34 @@ int64_t app_state_ms_since_touch(void) {
 
 // ======================= SESSÃO =============================================
 
-void app_state_session_start(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in_bars,
-                             uint8_t flags, bool local) {
+bool app_state_session_start(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in_bars,
+                             uint8_t flags, bool local, uint8_t session_id) {
     int64_t now = hal_time_us();
     LOCK();
-    s_session.active = true;
-    s_session.generation++;
-    s_session.t0_us = now;
-    s_session.flags = flags;
-    s_session.local = local;
-    s_flags = flags;
+    // Reenvio do mesmo SESSION_START (pacote perdido no caminho de volta):
+    // reiniciar zeraria o relógio de novo e dessincronizaria o app
+    bool duplicate = s_session.active && session_id != 0 && s_session.session_id == session_id;
+    if (!duplicate) {
+        s_session.active = true;
+        s_session.generation++;
+        s_session.t0_us = now;
+        s_session.flags = flags;
+        s_session.local = local;
+        s_session.session_id = session_id;
+        s_session.bpm = bpm;
+        s_flags = flags;
+    }
     UNLOCK();
-    circ_buffer_clear(&s_audio_buffer);
-    metronome_start(bpm, beats_per_bar, count_in_bars, flags, now);
+    if (duplicate) {
+        ESP_LOGI(TAG, "SESSION_START repetido (sessão %u): ignorado", session_id);
+        return false;
+    }
+    metronome_start(bpm, beats_per_bar, count_in_bars, flags, now, session_id);
     ESP_LOGI(TAG, "Sessão iniciada: %u BPM, %u tempos, %u compassos de contagem",
              bpm, beats_per_bar, count_in_bars);
+    ui_event(UI_EV_INFO, "%s iniciada: %u BPM, %u tempos por compasso",
+             local ? "Captura local" : "Execução", bpm, beats_per_bar);
+    return true;
 }
 
 void app_state_session_stop(void) {
@@ -133,6 +152,7 @@ void app_state_session_stop(void) {
     if (was) {
         metronome_stop();
         ESP_LOGI(TAG, "Sessão encerrada");
+        ui_event(UI_EV_INFO, "Execução encerrada");
     }
 }
 
@@ -189,6 +209,10 @@ uint32_t app_state_dropped_events(void) {
     return s_dropped;
 }
 
+uint32_t app_state_dropped_stream(void) {
+    return s_dropped_stream;
+}
+
 uint32_t app_state_notes_detected(void) {
     return s_notes;
 }
@@ -210,19 +234,45 @@ void app_state_refresh_status_led(void) {
     }
 }
 
-// ======================= FILA DE SAÍDA ======================================
+// ======================= FILAS DE SAÍDA =====================================
 
-bool app_state_post(const OutEvent *ev) {
-    if (ev->type == OUT_NOTE && ev->u.note.type == NOTE_EVENT_ON) s_notes++;
-    if (xQueueSend(s_queue, ev, 0) != pdTRUE) {
-        s_dropped++;                                    // Fila cheia: evento perdido
-        return false;
-    }
-    return true;
+static bool is_stream(OutEventType type) {
+    return type == OUT_PITCH || type == OUT_AUDIO_READY;
 }
 
-QueueHandle_t app_state_queue(void) {
-    return s_queue;
+bool app_state_post(const OutEvent *ev) {
+    bool stream = is_stream(ev->type);
+    // Produtores (áudio, metrônomo, rede) nunca bloqueiam: timeout 0
+    bool ok = xQueueSend(stream ? s_queue_stream : s_queue_ctrl, ev, 0) == pdTRUE;
+    LOCK();
+    if (ev->type == OUT_NOTE && ev->u.note.type == NOTE_EVENT_ON) s_notes++;
+    if (!ok) {
+        if (stream) {
+            s_dropped_stream++;                         // Fluxo de diagnóstico: aceitável
+        } else {
+            s_dropped++;                                // Evento importante perdido
+        }
+    }
+    TaskHandle_t consumer = s_consumer;
+    UNLOCK();
+    if (ok && consumer) xTaskNotifyGive(consumer);
+    return ok;
+}
+
+void app_state_set_consumer(TaskHandle_t task) {
+    LOCK();
+    s_consumer = task;
+    UNLOCK();
+}
+
+bool app_state_next_event(OutEvent *out, TickType_t wait) {
+    while (1) {
+        // Prioridade: respostas, notas e batidas antes de altura/áudio bruto
+        if (xQueueReceive(s_queue_ctrl, out, 0) == pdTRUE) return true;
+        if (xQueueReceive(s_queue_stream, out, 0) == pdTRUE) return true;
+        // Filas vazias: dorme até a próxima notificação de um produtor
+        if (ulTaskNotifyTake(pdTRUE, wait) == 0) return false;
+    }
 }
 
 CircularBuffer *app_state_audio_buffer(void) {

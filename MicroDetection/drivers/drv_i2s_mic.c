@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -56,6 +57,11 @@ bool drv_i2s_mic_init(const DrvI2sMicConfig *cfg, size_t max_samples_per_read) {
         drv_i2s_mic_deinit();
         return false;
     }
+
+    // Pull-down no SD: com o microfone desligado ou o fio solto a linha fica
+    // em 0 (em vez de flutuar), e a ausência de sinal é detectada com certeza.
+    // O INMP441 aciona a linha com força suficiente quando está ativo.
+    gpio_pulldown_en((gpio_num_t)cfg->data_pin);
 
     s_capacity = max_samples_per_read;
     s_raw = malloc(max_samples_per_read * sizeof(int32_t));

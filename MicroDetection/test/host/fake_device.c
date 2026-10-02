@@ -5,7 +5,9 @@
  * Usa o mesmo protocol.h do firmware e responde ao app pela rede:
  * DISCOVER -> ANNOUNCE, CONNECT -> CONNECT_ACK, PING -> PONG e, após
  * SESSION_START, envia batidas do metrônomo e uma escala de Dó
- * (NOTE_ON/NOTE_OFF) no andamento pedido.
+ * (NOTE_ON/NOTE_OFF) no andamento pedido. Segue as mesmas regras de
+ * sincronismo do firmware: SESSION_START repetido (mesmo session_id) não
+ * reinicia o relógio e SET_TEMPO vale a partir da batida `at_beat`.
  *
  * Compilar:  make -C test/host fake_device
  * Executar:  ./fake_device [porta]   (padrão: 54322)
@@ -63,8 +65,11 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
     int session = 0;
+    uint8_t session_id = 0;
     uint64_t t0 = 0;
     uint16_t bpm = 120;
+    uint16_t pending_bpm = 0, pending_at = 0;
+    uint32_t next_beat_ms = 0;          // Instante da próxima batida (relógio da sessão)
     uint8_t beats = 4, count_in = 2;
     int beat_index = 0, note_index = 0, note_on = 0;
     const uint8_t scale[8] = {60, 62, 64, 65, 67, 69, 71, 72};
@@ -119,6 +124,13 @@ int main(int argc, char **argv) {
                 }
                 case PKT_SESSION_START: {
                     PktSessionStart *s = (PktSessionStart *)buf;
+                    if (session && s->session_id != 0 && s->session_id == session_id) {
+                        printf("SESSION_START repetido (sessão %u): ignorado\n", session_id);
+                        break;
+                    }
+                    session_id = s->session_id;
+                    pending_bpm = 0;
+                    next_beat_ms = 0;
                     bpm = s->bpm;
                     beats = s->beats_per_bar;
                     count_in = s->count_in_bars;
@@ -138,7 +150,9 @@ int main(int argc, char **argv) {
                     session = 0;
                     break;
                 case PKT_SET_TEMPO:
-                    bpm = ((PktSetTempo *)buf)->bpm;
+                    pending_bpm = ((PktSetTempo *)buf)->bpm;
+                    pending_at = ((PktSetTempo *)buf)->at_beat;
+                    printf("SET_TEMPO %u BPM na batida %u\n", pending_bpm, pending_at);
                     break;
             }
             fflush(stdout);
@@ -146,19 +160,25 @@ int main(int argc, char **argv) {
 
         if (!session || !paired) continue;
         uint32_t t = (uint32_t)(now_ms() - t0);
-        uint32_t beat_ms = 60000 / bpm;
 
-        // Batidas do metrônomo
-        while ((uint32_t)beat_index * beat_ms <= t) {
+        // Batidas do metrônomo (troca de andamento na batida pedida)
+        while (next_beat_ms <= t) {
+            if (pending_bpm && (uint32_t)beat_index >= pending_at) {
+                bpm = pending_bpm;
+                pending_bpm = 0;
+            }
             PktBeat p = {0};
-            header(&p.h, PKT_BEAT, beat_index * beat_ms);
+            header(&p.h, PKT_BEAT, next_beat_ms);
             p.beat_in_bar = beat_index % beats;
             p.bar_index = beat_index / beats;
             p.count_in = p.bar_index < count_in;
             p.bpm = bpm;
+            p.session_id = session_id;
             send_to(&peer, &p, sizeof(p));
             beat_index++;
+            next_beat_ms += 60000 / bpm;
         }
+        uint32_t beat_ms = 60000 / bpm;
 
         // Escala de Dó em semínimas logo após a contagem
         uint32_t music_start = count_in * beats * beat_ms;

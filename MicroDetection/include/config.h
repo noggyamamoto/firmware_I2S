@@ -22,7 +22,7 @@
 
 #include "sdkconfig.h"
 
-#define FIRMWARE_VERSION        "1.0.0"                 // Versão enviada no ANNOUNCE
+#define FIRMWARE_VERSION        "1.1.0"                 // Versão enviada no ANNOUNCE
 #define DEVICE_NAME_PREFIX      "PartituraIoT"          // Prefixo do nome do dispositivo
 
 // ======================= PINOS ==============================================
@@ -56,7 +56,13 @@
 #define UART_PORT               0                       // Porta UART0 (monitor serial)
 #define UART_BAUDRATE           115200                  // Taxa de transmissão serial (bps)
 #define UART_RX_BUF_SIZE        2048                    // Buffer de recepção UART
-#define UART_TX_BUF_SIZE        2048                    // Buffer de transmissão UART
+#define UART_TX_BUF_SIZE        4096                    // Buffer de transmissão UART (uma tela do menu)
+
+// --- Menu serial (serial_ui) ---
+#define SERIAL_UI_ANSI          1                       // 1 = cores e cursor ANSI (PlatformIO, PuTTY, screen)
+                                                        // 0 = texto puro (ex.: Monitor Serial da IDE Arduino)
+#define SERIAL_UI_IDLE_RESET_MS 20000                   // Sem interação por 20 s: o menu volta ao início
+#define CONSOLE_LOG_LINES       40                      // Linhas guardadas do log técnico (não impresso)
 
 // ======================= ÁUDIO ==============================================
 #define SAMPLE_RATE             16000                   // Taxa de amostragem: 16 kHz
@@ -91,12 +97,18 @@
 #define WIFI_DEFAULT_SSID       "SSID"                  // Nome da rede Wi-Fi (substituir)
 #define WIFI_DEFAULT_PASS       "SENHA"                 // Senha da rede Wi-Fi
 #define WIFI_MAX_RETRIES        8                       // Tentativas antes de ativar o modo AP
+#define WIFI_FATAL_RETRIES      3                       // Idem quando a causa não se resolve sozinha
+                                                        // (senha incorreta, rede inexistente)
+#define WIFI_COUNTRY_CODE       "BR"                    // Canais 1–13 (Anatel): alcança modems nos canais 12/13
+#define WIFI_DHCP_TIMEOUT_MS    12000                   // Associado à rede, mas sem IP após esse tempo
 #define WIFI_AP_PASS            "partitura123"          // Senha da rede própria (modo AP)
 #define WIFI_AP_CHANNEL         6                       // Canal da rede própria
 
 #define WS_PORT                 80                      // Servidor WebSocket do app web (ws://IP/ws)
 
 #define SESSION_TIMEOUT_MS      5000                    // Sem PING por esse tempo = app perdido
-#define EVENT_QUEUE_LENGTH      32                      // Capacidade da fila de eventos
+#define EVENT_QUEUE_LENGTH      32                      // Fila prioritária: notas, batidas e respostas
+#define STREAM_QUEUE_LENGTH     16                      // Fila de fluxo contínuo: altura e áudio bruto
+#define WS_SEND_TIMEOUT_S       1                       // Tempo máximo de envio por WebSocket (padrão: 5 s)
 
 #endif // CONFIG_H
