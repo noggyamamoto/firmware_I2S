@@ -1,81 +1,57 @@
 /*
  * ============================================================================
- * Implementação do buffer circular sincronizado
+ * Implementação do buffer circular (SPSC, sem cópia, spinlock no contador)
  * ============================================================================
  */
 #include "circular_buffer.h"
 
-#include <stdlib.h>
+#include <string.h>
 
-#include "esp_log.h"
-
-/**
- * @brief Inicializa o buffer circular criando o mutex e zerando índices.
- */
 void circ_buffer_init(CircularBuffer *cb) {
     cb->head = 0;                                           // Inicia leitura no índice 0
     cb->tail = 0;                                           // Inicia escrita no índice 0
     cb->count = 0;                                          // Nenhum elemento armazenado
     cb->overruns = 0;
-    cb->mutex = xSemaphoreCreateMutex();                    // Cria o mutex do FreeRTOS
-    if (cb->mutex == NULL) {                                // Verifica se a criação falhou
-        ESP_LOGE("CircBuffer", "Falha ao criar mutex");     // Log de erro crítico
-        abort();                                            // Aborta execução (crítico)
-    }
+    portMUX_INITIALIZE(&cb->lock);
 }
 
 /**
- * @brief Insere um frame no buffer. Se estiver cheio, descarta o mais antigo
- *        (o áudio mais recente é o mais útil para o feedback em tempo real).
- * @return true se não houve descarte.
+ * @brief Slot da cauda para o produtor preencher. Se o buffer estiver cheio,
+ *        conta um overrun e retorna NULL (o quadro deve ser descartado).
  */
-bool circ_buffer_push(CircularBuffer *cb, const AudioFrame *frame) {
-    if (xSemaphoreTake(cb->mutex, portMAX_DELAY) != pdTRUE)
-        return false;
-    bool ok = true;
-    if (cb->count >= CIRC_BUFFER_CAPACITY) {                // Buffer cheio: descarta o mais antigo
-        cb->head = (cb->head + 1) % CIRC_BUFFER_CAPACITY;
-        cb->count--;
-        cb->overruns++;
-        ok = false;
-    }
-    cb->buffer[cb->tail] = *frame;                          // Copia o frame para a posição de escrita
+AudioFrame *circ_buffer_write_slot(CircularBuffer *cb) {
+    portENTER_CRITICAL(&cb->lock);
+    bool full = cb->count >= CIRC_BUFFER_CAPACITY;
+    if (full) cb->overruns++;
+    portEXIT_CRITICAL(&cb->lock);
+    return full ? NULL : &cb->buffer[cb->tail];
+}
+
+/** @brief Publica o slot preenchido para o consumidor. */
+void circ_buffer_commit(CircularBuffer *cb) {
     cb->tail = (cb->tail + 1) % CIRC_BUFFER_CAPACITY;       // Avança o índice de escrita (circular)
+    portENTER_CRITICAL(&cb->lock);
     cb->count++;
-    xSemaphoreGive(cb->mutex);
-    return ok;
+    portEXIT_CRITICAL(&cb->lock);
 }
 
-/**
- * @brief Remove e obtém um frame do buffer.
- * @return true se havia um frame disponível.
- */
-bool circ_buffer_pop(CircularBuffer *cb, AudioFrame *out) {
-    if (xSemaphoreTake(cb->mutex, portMAX_DELAY) != pdTRUE)
-        return false;
-    if (cb->count == 0) {                                   // Buffer vazio
-        xSemaphoreGive(cb->mutex);
-        return false;
-    }
-    *out = cb->buffer[cb->head];                            // Copia o frame da posição de leitura
+/** @brief Quadro mais antigo, ainda no buffer (NULL se vazio). */
+AudioFrame *circ_buffer_read_slot(CircularBuffer *cb) {
+    portENTER_CRITICAL(&cb->lock);
+    bool empty = cb->count == 0;
+    portEXIT_CRITICAL(&cb->lock);
+    return empty ? NULL : &cb->buffer[cb->head];
+}
+
+/** @brief Devolve o slot lido ao produtor. */
+void circ_buffer_release(CircularBuffer *cb) {
     cb->head = (cb->head + 1) % CIRC_BUFFER_CAPACITY;       // Avança índice de leitura (circular)
+    portENTER_CRITICAL(&cb->lock);
     cb->count--;
-    xSemaphoreGive(cb->mutex);
-    return true;
+    portEXIT_CRITICAL(&cb->lock);
 }
 
-/**
- * @brief Número de elementos atualmente no buffer (diagnóstico).
- */
+/** @brief Número de elementos atualmente no buffer (diagnóstico). */
 int circ_buffer_count(CircularBuffer *cb) {
     return cb->count;
-}
-
-/**
- * @brief Esvazia o buffer (fim de sessão).
- */
-void circ_buffer_clear(CircularBuffer *cb) {
-    if (xSemaphoreTake(cb->mutex, portMAX_DELAY) != pdTRUE) return;
-    cb->head = cb->tail = cb->count = 0;
-    xSemaphoreGive(cb->mutex);
 }
