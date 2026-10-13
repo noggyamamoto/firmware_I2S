@@ -10,6 +10,7 @@
 #include "esp_log.h"
 
 #include "config.h"
+#include "execution_monitor.h"
 #include "hal_indicators.h"
 #include "hal_time.h"
 #include "hal_wifi.h"
@@ -151,6 +152,7 @@ void app_state_session_stop(void) {
     UNLOCK();
     if (was) {
         metronome_stop();
+        execution_monitor_session_stop();
         ESP_LOGI(TAG, "Sessão encerrada");
         ui_event(UI_EV_INFO, "Execução encerrada");
     }

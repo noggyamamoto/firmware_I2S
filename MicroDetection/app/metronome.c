@@ -13,6 +13,7 @@
 #include "app_state.h"
 #include "audio_pipeline.h"
 #include "config.h"
+#include "execution_monitor.h"
 #include "hal_indicators.h"
 #include "hal_time.h"
 #include "protocol.h"
@@ -102,6 +103,7 @@ static void beat_cb(void *arg) {
     }
 
     if (!test) {
+        execution_monitor_set_bpm(bpm);
         OutEvent ev = {.type = OUT_BEAT, .timestamp_ms = t_ms};
         ev.u.beat.beat_in_bar = beat_in_bar;
         ev.u.beat.count_in = count_in;

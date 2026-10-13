@@ -23,6 +23,7 @@
 #include "config.h"
 #include "diagnostics.h"
 #include "dsp.h"
+#include "execution_monitor.h"
 #include "hal_console.h"
 #include "hal_net.h"
 #include "hal_storage.h"
@@ -275,6 +276,7 @@ typedef enum {
     SCR_NOTES,
     SCR_LOG,
     SCR_CONFIRM_RESTART,
+    SCR_EXECUTION,                      // Monitor da execução do app (texto corrido)
 } Screen;
 
 typedef enum { INPUT_SSID, INPUT_PASSWORD } InputPurpose;
@@ -489,6 +491,53 @@ static void act_capture(void) {
 }
 
 static void act_notes(void) { go(SCR_NOTES); }
+
+// ======================= MONITOR DA EXECUÇÃO =================================
+// Durante a execução do app o terminal deixa de redesenhar o menu e passa a
+// mostrar, linha a linha, as notas esperadas e as captadas (rolagem normal).
+
+static bool s_exec_end_shown = false;
+
+static void enter_execution(void) {
+    s_screen = SCR_EXECUTION;
+    s_exec_end_shown = false;
+    char ip[24];
+    hal_wifi_ip_str(ip, sizeof(ip));
+#if SERIAL_UI_ANSI
+    hal_console_write("\033[?25l\033[2J\033[H");
+#endif
+    hal_console_printf("%s  PARTITURA IoT - MONITOR DA EXECUCAO  (%s)%s\r\n", ST_BANNER,
+                       hal_wifi_device_name(), ST_RESET);
+    hal_console_printf("%s  App: %s  -  IP %s%s\r\n", ST_SOFT,
+                       app_state_is_paired() ? app_state_peer_name() : "(nenhum)", ip, ST_RESET);
+    hal_console_printf("%s  ESPERADO = nota da partitura na hora certa  |  CAPTADO = nota do "
+                       "microfone%s\r\n", ST_SOFT, ST_RESET);
+    hal_console_printf("%s  ESC volta ao menu (o monitor continua em Captura e audio > 6)%s\r\n\r\n",
+                       ST_SOFT, ST_RESET);
+}
+
+static void act_exec_monitor(void) { enter_execution(); }
+
+/* Imprime as linhas novas do monitor (somente na tela da execução). */
+static void execution_tick(void) {
+    static uint32_t last_ms = 0;
+    static char lines[16][EXEC_MONITOR_LINE_LEN];
+    SessionInfo s = app_state_session();
+    if (s.active && !s.local) last_ms = app_state_session_ms();
+    int n = execution_monitor_poll(last_ms, lines, 16);
+    if (s_screen != SCR_EXECUTION) return;              // Fora da tela: descarta
+    for (int i = 0; i < n; i++) {
+        bool head = lines[i][0] == '=' || lines[i][0] == '-';
+        bool exp = lines[i][0] == 'E';
+        hal_console_printf("%s%s%s\r\n", head ? ST_TITLE : (exp ? ST_KEY : ST_TEXT), lines[i],
+                           ST_RESET);
+    }
+    if (!execution_monitor_active() && n == 0 && !s_exec_end_shown) {
+        s_exec_end_shown = true;
+        hal_console_printf("%s  Sem execucao em andamento. Tecle ENTER para voltar ao menu.%s\r\n",
+                           ST_SOFT, ST_RESET);
+    }
+}
 static void act_tuner(void) { go(SCR_TUNER); }
 
 static void act_metronome(void) {
@@ -530,6 +579,7 @@ static const MenuItem AUDIO_ITEMS[] = {
     {"Afinador e nível do microfone", NULL, act_tuner, false},
     {"Testar metrônomo (2 compassos)", NULL, act_metronome, false},
     {NULL, label_raw_audio, act_raw_audio, false},
+    {"Monitor da execução do app (esperado x captado)", NULL, act_exec_monitor, false},
 };
 
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
@@ -591,7 +641,7 @@ static void render_wifi_menu(void) {
 static void render_audio_menu(void) {
     render_problems(1);
     render_menu("CAPTURA E ÁUDIO", AUDIO_ITEMS, COUNT(AUDIO_ITEMS), s_sel_audio);
-    render_footer("↑/↓ mover · ENTER escolher · 1-5 atalho · ESC voltar");
+    render_footer("↑/↓ mover · ENTER escolher · 1-6 atalho · ESC voltar");
 }
 
 static void render_status(void) {
@@ -842,6 +892,7 @@ static void render(void) {
         case SCR_NOTES:           render_notes(); break;
         case SCR_LOG:             render_log(); break;
         case SCR_CONFIRM_RESTART: render_confirm_restart(); break;
+        case SCR_EXECUTION:       return;           // Texto corrido (execution_tick)
     }
     flush();
 }
@@ -999,6 +1050,11 @@ static void handle_key(Key k) {
         case SCR_LOG:
             if (k.kind != K_UP && k.kind != K_DOWN) go(SCR_MAIN);
             break;
+        case SCR_EXECUTION:
+            if (k.kind == K_ENTER || k.kind == K_ESC || k.kind == K_LEFT || k.kind == K_BKSP) {
+                go(SCR_MAIN);
+            }
+            break;
         case SCR_CONFIRM_RESTART:
             if (k.kind == K_ENTER) {
                 buf_reset();
@@ -1048,13 +1104,22 @@ static void ui_task(void *pvParameters) {
             s_last_key_us = now;
             handle_key(k);
             dirty = true;
-        } else if (s_interacted &&
+        } else if (s_interacted && s_screen != SCR_EXECUTION &&
                    now - s_last_key_us >= (int64_t)SERIAL_UI_IDLE_RESET_MS * 1000) {
             reset_menu();                       // 20 s sem tecla após uma interação
             dirty = true;
         }
 
-        if (dirty || now - last_render >= (int64_t)refresh_period_ms() * 1000) {
+        // Execução iniciada pelo app: o terminal passa a mostrar o monitor
+        // (exceto enquanto o usuário digita um nome de rede ou senha)
+        if (execution_monitor_take_started() && s_screen != SCR_INPUT) {
+            s_interacted = false;
+            enter_execution();
+        }
+        execution_tick();
+
+        if (s_screen != SCR_EXECUTION &&
+            (dirty || now - last_render >= (int64_t)refresh_period_ms() * 1000)) {
             render();
             last_render = now;
         }

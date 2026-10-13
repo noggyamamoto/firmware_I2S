@@ -14,6 +14,7 @@
 
 #include "app_state.h"
 #include "config.h"
+#include "execution_monitor.h"
 #include "hal_audio.h"
 #include "hal_time.h"
 #include "dsp.h"
@@ -147,7 +148,10 @@ static void publish_note(const NoteEvent *ev, bool local) {
         .timestamp_ms = ev->time_ms,
     };
     out.u.note = *ev;
-    if (!local) app_state_post(&out);
+    if (!local) {
+        app_state_post(&out);
+        execution_monitor_captured(ev);         // Monitor serial (só registra)
+    }
 
     portENTER_CRITICAL(&s_recent_lock);
     s_recent[s_recent_next] = *ev;

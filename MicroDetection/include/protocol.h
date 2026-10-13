@@ -38,6 +38,7 @@
 #define PKT_SESSION_START       0x06        // Início da execução (zera o relógio)
 #define PKT_SESSION_STOP        0x07        // Fim/interrupção da execução
 #define PKT_SET_TEMPO           0x08        // Altera o BPM na próxima batida
+#define PKT_EXPECTED_NOTE       0x09        // Nota esperada da partitura (monitor serial)
 
 // Dispositivo -> App
 #define PKT_ANNOUNCE            0x81        // Resposta ao DISCOVER
@@ -96,7 +97,8 @@ typedef struct {
     uint8_t  count_in_bars;             // Compassos de contagem (RFA05 = 2)
     uint8_t  flags;                     // CFG_FLAG_*
     uint8_t  session_id;                // Identificador da execução (1..255)
-    uint8_t  reserved[2];
+    uint8_t  beat_type;                 // Denominador da fórmula de compasso (0 = 4)
+    uint8_t  reserved;
 } PktSessionStart;
 
 /* PKT_SET_TEMPO
@@ -109,6 +111,21 @@ typedef struct {
     uint16_t bpm;                       // Novo andamento
     uint16_t at_beat;                   // Batida em que o novo andamento começa
 } PktSetTempo;
+
+/* PKT_EXPECTED_NOTE
+ * Nota que o aluno deve tocar, enviada pelo app antes do início de cada
+ * trecho, somente para o monitor da execução no terminal serial (o app é
+ * quem avalia). Reenviar o mesmo índice substitui a nota (mudança de BPM). */
+typedef struct {
+    PacketHeader h;
+    uint16_t index;                     // Posição na lista de notas esperadas
+    uint8_t  midi;                      // Nota MIDI esperada
+    uint8_t  reserved;
+    uint32_t onset_ms;                  // Início no relógio da sessão
+    uint32_t duration_ms;               // Duração no andamento atual
+    uint16_t beats_milli;               // Duração em milésimos de semínima (figura)
+    uint16_t reserved2;
+} PktExpectedNote;
 
 /* PKT_ANNOUNCE */
 typedef struct {
