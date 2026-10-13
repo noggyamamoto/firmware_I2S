@@ -22,7 +22,7 @@
 
 static const char *TAG = "audio";
 
-static BandpassFilter  s_filter;                    // Passa-banda 70 Hz – 2,5 kHz
+static BandpassFilter  s_filter;                    // Passa-banda 200 Hz – 2,5 kHz
 static YinDetector     s_yin;                       // Detector de altura
 static NoteTracker     s_tracker;                   // Segmentação de notas
 static float           s_window[WINDOW_SAMPLES];    // Janela deslizante de análise
@@ -74,6 +74,8 @@ bool audio_pipeline_init(void) {
     cfg.onset_timeout_hops = ONSET_TIMEOUT_HOPS;
     cfg.release_hops = RELEASE_HOPS;
     cfg.quantize_ms = QUANTIZE_MS;
+    cfg.min_midi = MIN_MIDI_NOTE;
+    cfg.max_midi = MAX_MIDI_NOTE;
     note_tracker_init(&s_tracker, &cfg);
 
     memset(s_window, 0, sizeof(s_window));
@@ -92,6 +94,7 @@ void audio_pipeline_mask_click(uint32_t until_ms, float click_hz) {
 }
 
 uint32_t audio_pipeline_process_time_us(void) { return s_process_us; }
+uint32_t audio_pipeline_clock_resyncs(void) { return hal_audio_resync_count(); }
 float audio_pipeline_level_db(void) { return s_level_db; }
 float audio_pipeline_last_pitch_hz(void) { return s_last_pitch; }
 MicStatus audio_pipeline_mic_status(void) { return s_mic_status; }
@@ -166,20 +169,21 @@ static void audio_task(void *arg) {
     bool was_active = false;
     int hop_counter = 0;
     int read_fails = 0;
+    int yield_counter = 0;
     size_t frame_fill = 0;
     AudioFrame *frame = NULL;                       // Slot do buffer circular em preenchimento
 
     if (!hal_audio_start()) s_mic_status = MIC_STATUS_READ_ERROR;
 
     while (1) {
-        // Instante da primeira amostra do trecho que será lido
-        int64_t hop_start_us = hal_audio_next_sample_time_us();
         if (hal_audio_read(s_hop, HOP_SAMPLES, 200) != HOP_SAMPLES) {
             if (++read_fails >= MIC_READ_FAILS) s_mic_status = MIC_STATUS_READ_ERROR;
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
         read_fails = 0;
+        // Instante da primeira amostra do trecho lido (relógio do sistema)
+        int64_t hop_start_us = hal_audio_block_time_us();
         int64_t t_begin = hal_time_us();
         check_microphone(s_hop, HOP_SAMPLES);
 
@@ -279,6 +283,15 @@ static void audio_task(void *arg) {
         // Tempo de processamento por janela (RNFE01: deve ficar bem abaixo de 16 ms)
         uint32_t spent = (uint32_t)(hal_time_us() - t_begin);
         s_process_us = (s_process_us * 7 + spent) / 8;
+
+        // Garantia para o watchdog: se o processamento ficar perto do tempo de
+        // uma janela, a leitura nunca bloqueia e a tarefa ociosa do núcleo 1
+        // não roda (task_wdt). Cede 1 tick no máximo a cada ~2 s; o DMA guarda
+        // ~96 ms de áudio, então nenhuma amostra é perdida.
+        if (++yield_counter >= 125) {
+            yield_counter = 0;
+            if (s_process_us > HOP_SAMPLES * 1000000u / SAMPLE_RATE * 3 / 4) vTaskDelay(1);
+        }
     }
 }
 

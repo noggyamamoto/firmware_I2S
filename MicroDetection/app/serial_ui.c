@@ -624,6 +624,8 @@ static void render_status(void) {
          audio_pipeline_level_db(), app_state_noise_floor());
     line(ST_TEXT, " Processamento:      %" PRIu32 " us por janela de %d ms",
          audio_pipeline_process_time_us(), HOP_SAMPLES * 1000 / SAMPLE_RATE);
+    line(ST_TEXT, " Relógio do áudio:   %" PRIu32 " correções (amostras perdidas)",
+         audio_pipeline_clock_resyncs());
     line(ST_TEXT, " Memória livre:      %" PRIu32 " bytes", hal_system_free_heap());
     rule();
     render_problems(2);

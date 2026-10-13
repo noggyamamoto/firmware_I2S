@@ -10,6 +10,7 @@
  *  - detecção de reataque (mesma nota tocada repetidamente)
  *  - quantização leve dos tempos (tolerância temporal – RNFE04)
  *  - máscara temporal para ignorar o clique do metrônomo
+ *  - faixa de notas aceitas (a partir do C4): alturas fora dela não geram nota
  *
  * Módulo independente de hardware (testado no computador em test/host).
  * ============================================================================
@@ -31,6 +32,8 @@ typedef struct {
     int      onset_timeout_hops;    // Janelas máximas aguardando altura estável
     int      release_hops;          // Janelas abaixo do limiar para soltar
     uint32_t quantize_ms;           // Grade de quantização temporal
+    int      min_midi;              // Menor nota aceita (C4 = 60); abaixo é ignorada
+    int      max_midi;              // Maior nota aceita
 } NoteTrackerConfig;
 
 typedef enum {

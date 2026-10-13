@@ -22,6 +22,8 @@ void note_tracker_default_config(NoteTrackerConfig *cfg) {
     cfg->onset_timeout_hops = 8;
     cfg->release_hops = 2;
     cfg->quantize_ms = 10;
+    cfg->min_midi = 60;                                 // C4
+    cfg->max_midi = 96;                                 // C7
 }
 
 void note_tracker_init(NoteTracker *t, const NoteTrackerConfig *cfg) {
@@ -162,8 +164,13 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
     const float gate = note_tracker_gate_db(t);
     const float release = gate - t->cfg.release_hysteresis_db;
     const bool masked = hop_start_ms < t->mask_until_ms;
-    bool voiced = freq_hz > 0.0f && confidence >= t->cfg.min_confidence;
-    int midi_now = voiced ? (int)lroundf(dsp_hz_to_midi(freq_hz)) : -1;
+    // Som periódico (tem altura) e, entre eles, os que estão na faixa aceita.
+    // Um som periódico fora da faixa (abaixo do C4) não vira nota, mas também
+    // não é tratado como ruído no aprendizado do piso.
+    const bool pitched = freq_hz > 0.0f && confidence >= t->cfg.min_confidence;
+    int midi_now = pitched ? (int)lroundf(dsp_hz_to_midi(freq_hz)) : -1;
+    bool voiced = pitched && midi_now >= t->cfg.min_midi && midi_now <= t->cfg.max_midi;
+    if (!voiced) midi_now = -1;
     const float jump = hop_db - t->prev_db;
 
     // Durante o clique do metrônomo, a altura do próprio clique é ignorada
@@ -174,7 +181,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
 
     switch (t->state) {
         case TRACKER_IDLE:
-            update_noise_floor(t, hop_db, voiced);
+            update_noise_floor(t, hop_db, pitched);
             if (hop_db >= note_tracker_gate_db(t)) {
                 start_candidate(t, hop_start_ms, hop_db, false);
                 if (voiced) candidate_add_pitch(t, midi_now, freq_hz, confidence);
@@ -200,7 +207,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
             if (hop_db > t->cand_peak_db) t->cand_peak_db = hop_db;
             if (voiced) {
                 candidate_add_pitch(t, midi_now, freq_hz, confidence);
-            } else if (!t->cand_over_active) {
+            } else if (!t->cand_over_active && !pitched) {
                 update_noise_floor(t, hop_db, false);   // Ruído sem altura: ajusta o limiar
             }
 

@@ -37,6 +37,9 @@ void audio_pipeline_mask_click(uint32_t until_ms, float click_hz);
 /** @brief Carga média de processamento por janela (µs), para diagnóstico. */
 uint32_t audio_pipeline_process_time_us(void);
 
+/** @brief Vezes em que o relógio das amostras foi corrigido (amostras perdidas). */
+uint32_t audio_pipeline_clock_resyncs(void);
+
 /** @brief Último nível RMS medido (dBFS) e última altura estimada (Hz). */
 float audio_pipeline_level_db(void);
 float audio_pipeline_last_pitch_hz(void);

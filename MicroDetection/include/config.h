@@ -67,15 +67,18 @@
 // ======================= ÁUDIO ==============================================
 #define SAMPLE_RATE             16000                   // Taxa de amostragem: 16 kHz
 #define HOP_SAMPLES             256                     // Amostras lidas por iteração (16 ms)
-#define WINDOW_SAMPLES          1024                    // Janela de análise do YIN (64 ms)
+#define WINDOW_SAMPLES          512                     // Janela de análise do YIN (32 ms): a partir
+                                                        // do C4 cabem mais de 8 períodos na janela
 #define BLOCK_SAMPLES           1024                    // Amostras por quadro bruto (modo diagnóstico)
 #define INPUT_GAIN              4.0f                    // Ganho digital aplicado ao sinal do INMP441
 
 // ======================= DSP ================================================
-#define BANDPASS_LOW_HZ         70.0f                   // Corte inferior do passa-banda
+#define BANDPASS_LOW_HZ         200.0f                  // Corte inferior do passa-banda (abaixo do C4)
 #define BANDPASS_HIGH_HZ        2500.0f                 // Corte superior do passa-banda
-#define PITCH_MIN_HZ            65.0f                   // Dó 2 (C2)
+#define PITCH_MIN_HZ            254.0f                  // Dó 4 (C4 = 261,6 Hz) com margem de -50 cents
 #define PITCH_MAX_HZ            2100.0f                 // Dó 7 (C7)
+#define MIN_MIDI_NOTE           60                      // C4: notas abaixo são ignoradas
+#define MAX_MIDI_NOTE           96                      // C7
 #define YIN_THRESHOLD           0.15f                   // Limiar de aperiodicidade do YIN
 #define MIN_CONFIDENCE          0.70f                   // Confiança mínima para aceitar a altura
 
