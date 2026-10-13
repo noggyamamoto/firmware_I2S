@@ -50,7 +50,7 @@ const char *diagnostics_mic_text(MicStatus status) {
         case MIC_STATUS_NO_SIGNAL:      return "SEM SINAL";
         case MIC_STATUS_READ_ERROR:     return "ERRO DE LEITURA (I2S)";
         case MIC_STATUS_CLIPPING:       return "SATURADO";
-        case MIC_STATUS_INIT_FAILED:    return "NÃO INICIOU";
+        case MIC_STATUS_INIT_FAILED:    return "NAO INICIOU";
     }
     return "?";
 }
@@ -59,15 +59,15 @@ void diagnostics_wifi_error_text(const HalWifiDiag *d, char *buf, int len) {
     switch (d->error) {
         case HAL_WIFI_ERR_NONE:             snprintf(buf, len, "sem erro"); break;
         case HAL_WIFI_ERR_NOT_CONFIGURED:   snprintf(buf, len, "nenhuma rede cadastrada"); break;
-        case HAL_WIFI_ERR_INVALID_PASSWORD: snprintf(buf, len, "senha com tamanho inválido"); break;
-        case HAL_WIFI_ERR_SSID_NOT_FOUND:   snprintf(buf, len, "rede \"%s\" não encontrada", d->ssid); break;
+        case HAL_WIFI_ERR_INVALID_PASSWORD: snprintf(buf, len, "senha com tamanho invalido"); break;
+        case HAL_WIFI_ERR_SSID_NOT_FOUND:   snprintf(buf, len, "rede \"%s\" nao encontrada", d->ssid); break;
         case HAL_WIFI_ERR_WRONG_PASSWORD:   snprintf(buf, len, "senha incorreta para \"%s\"", d->ssid); break;
-        case HAL_WIFI_ERR_SECURITY:         snprintf(buf, len, "segurança da rede incompatível"); break;
+        case HAL_WIFI_ERR_SECURITY:         snprintf(buf, len, "seguranca da rede incompativel"); break;
         case HAL_WIFI_ERR_WEAK_SIGNAL:      snprintf(buf, len, "sinal fraco da rede \"%s\"", d->ssid); break;
-        case HAL_WIFI_ERR_REJECTED:         snprintf(buf, len, "o modem recusou a conexão"); break;
-        case HAL_WIFI_ERR_NO_IP:            snprintf(buf, len, "o modem não entregou endereço IP"); break;
-        case HAL_WIFI_ERR_CONNECTION_LOST:  snprintf(buf, len, "a conexão com \"%s\" caiu", d->ssid); break;
-        case HAL_WIFI_ERR_OTHER:            snprintf(buf, len, "falha de conexão (código %u)", d->reason); break;
+        case HAL_WIFI_ERR_REJECTED:         snprintf(buf, len, "o modem recusou a conexao"); break;
+        case HAL_WIFI_ERR_NO_IP:            snprintf(buf, len, "o modem nao entregou endereco IP"); break;
+        case HAL_WIFI_ERR_CONNECTION_LOST:  snprintf(buf, len, "a conexao com \"%s\" caiu", d->ssid); break;
+        case HAL_WIFI_ERR_OTHER:            snprintf(buf, len, "falha de conexao (codigo %u)", d->reason); break;
     }
 }
 
@@ -100,30 +100,30 @@ static int wifi_problem(DiagProblem *p) {
             add_action(p, "Menu 2 > 1: escolha a rede na lista e digite a senha.");
             break;
         case HAL_WIFI_ERR_INVALID_PASSWORD:
-            set_title(p, level, "Senha da rede \"%s\" com tamanho inválido", d.ssid);
-            add_action(p, "Senhas WPA/WPA2 têm de 8 a 63 caracteres. Confira no modem.");
+            set_title(p, level, "Senha da rede \"%s\" com tamanho invalido", d.ssid);
+            add_action(p, "Senhas WPA/WPA2 tem de 8 a 63 caracteres. Confira no modem.");
             add_action(p, "Menu 2 > 1: escolha a rede e digite a senha novamente.");
             break;
         case HAL_WIFI_ERR_SSID_NOT_FOUND:
-            set_title(p, level, "Rede \"%s\" não encontrada", d.ssid);
+            set_title(p, level, "Rede \"%s\" nao encontrada", d.ssid);
             if (d.similar_ssid[0]) {
-                add_action(p, "Existe a rede \"%s\" (nome difere em maiúsculas/espaços): "
+                add_action(p, "Existe a rede \"%s\" (nome difere em maiusculas/espacos): "
                               "escolha-a no Menu 2 > 1.", d.similar_ssid);
             }
-            add_action(p, "O ESP32 só vê redes de 2,4 GHz: se o modem separa \"Casa\" e "
+            add_action(p, "O ESP32 so ve redes de 2,4 GHz: se o modem separa \"Casa\" e "
                           "\"Casa_5G\", use a de 2,4 GHz.");
-            add_action(p, "Confira o nome exato no Menu 2 > 1 e se o modem está ligado e perto.");
+            add_action(p, "Confira o nome exato no Menu 2 > 1 e se o modem esta ligado e perto.");
             break;
         case HAL_WIFI_ERR_WRONG_PASSWORD:
             set_title(p, level, "Senha incorreta para a rede \"%s\"", d.ssid);
-            add_action(p, "Menu 2 > 1: digite a senha de novo (maiúsculas contam; TAB mostra).");
+            add_action(p, "Menu 2 > 1: digite a senha de novo (maiusculas contam; TAB mostra).");
             add_action(p, "Se a senha estiver certa, reinicie o modem e use o Menu 2 > 3.");
             add_action(p, "Modem em \"somente WPA3\"? Troque para \"WPA2/WPA3\" ou \"WPA2\".");
             break;
         case HAL_WIFI_ERR_SECURITY:
-            set_title(p, level, "Segurança da rede \"%s\" incompatível (%s)", d.ssid,
+            set_title(p, level, "Seguranca da rede \"%s\" incompativel (%s)", d.ssid,
                       diagnostics_auth_name(d.ssid_auth));
-            add_action(p, "No modem, use WPA2-Pessoal ou WPA2/WPA3 (redes corporativas não).");
+            add_action(p, "No modem, use WPA2-Pessoal ou WPA2/WPA3 (redes corporativas nao).");
             add_action(p, "Depois use o Menu 2 > 3 para tentar de novo.");
             break;
         case HAL_WIFI_ERR_WEAK_SIGNAL:
@@ -138,23 +138,23 @@ static int wifi_problem(DiagProblem *p) {
         case HAL_WIFI_ERR_REJECTED: {
             uint8_t mac[6];
             hal_wifi_mac(mac);
-            set_title(p, level, "O modem recusou a conexão (código %u)", d.reason);
+            set_title(p, level, "O modem recusou a conexao (codigo %u)", d.reason);
             add_action(p, "Filtro de MAC ou limite de aparelhos no modem? MAC: %02X:%02X:%02X:%02X:%02X:%02X",
                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
             add_action(p, "Reinicie o modem e use o Menu 2 > 3 para tentar de novo.");
             break;
         }
         case HAL_WIFI_ERR_NO_IP:
-            set_title(p, level, "Conectou a \"%s\", mas o modem não entregou IP", d.ssid);
-            add_action(p, "Verifique se o DHCP do modem está ligado e se há IPs livres.");
+            set_title(p, level, "Conectou a \"%s\", mas o modem nao entregou IP", d.ssid);
+            add_action(p, "Verifique se o DHCP do modem esta ligado e se ha IPs livres.");
             add_action(p, "Reinicie o modem e use o Menu 2 > 3.");
             break;
         case HAL_WIFI_ERR_CONNECTION_LOST:
-            set_title(p, UI_EV_WARN, "A conexão com \"%s\" caiu (código %u)", d.ssid, d.reason);
+            set_title(p, UI_EV_WARN, "A conexao com \"%s\" caiu (codigo %u)", d.ssid, d.reason);
             add_action(p, "Reconectando automaticamente. Se repetir, aproxime do modem.");
             break;
         default:
-            set_title(p, level, "Falha ao conectar em \"%s\" (código %u)", d.ssid, d.reason);
+            set_title(p, level, "Falha ao conectar em \"%s\" (codigo %u)", d.ssid, d.reason);
             add_action(p, "Menu 2 > 3 para tentar de novo ou reinicie o modem.");
             break;
     }
@@ -170,26 +170,26 @@ static int wifi_problem(DiagProblem *p) {
 static int mic_problem(DiagProblem *p) {
     switch (audio_pipeline_mic_status()) {
         case MIC_STATUS_NO_SIGNAL:
-            set_title(p, UI_EV_ERROR, "Microfone sem sinal: nenhuma nota será detectada");
+            set_title(p, UI_EV_ERROR, "Microfone sem sinal: nenhuma nota sera detectada");
             add_action(p, "Confira os fios do INMP441: SD->GPIO%d, SCK->GPIO%d, WS->GPIO%d.",
                        I2S_DATA_IN_PIN, I2S_BCK_PIN, I2S_WS_PIN);
             add_action(p, "VDD no 3V3, GND comum e L/R no GND (canal esquerdo).");
-            add_action(p, "Depois confira o nível no Menu 3 > 3 (afinador).");
+            add_action(p, "Depois confira o nivel no Menu 3 > 3 (afinador).");
             return 1;
         case MIC_STATUS_READ_ERROR:
-            set_title(p, UI_EV_ERROR, "O microfone (I2S) não está entregando amostras");
+            set_title(p, UI_EV_ERROR, "O microfone (I2S) nao esta entregando amostras");
             add_action(p, "Reinicie o dispositivo (Menu 5).");
-            add_action(p, "Se persistir, confira se os pinos I2S do config.h estão livres.");
+            add_action(p, "Se persistir, confira se os pinos I2S do config.h estao livres.");
             return 1;
         case MIC_STATUS_INIT_FAILED:
-            set_title(p, UI_EV_ERROR, "Não foi possível iniciar o microfone (I2S)");
+            set_title(p, UI_EV_ERROR, "Nao foi possivel iniciar o microfone (I2S)");
             add_action(p, "Confira os pinos I2S no config.h e grave o firmware de novo.");
-            add_action(p, "Sem microfone as notas não são detectadas; o resto funciona.");
+            add_action(p, "Sem microfone as notas nao sao detectadas; o resto funciona.");
             return 1;
         case MIC_STATUS_CLIPPING:
-            set_title(p, UI_EV_WARN, "Áudio saturado: o som chega alto demais ao microfone");
+            set_title(p, UI_EV_WARN, "Audio saturado: o som chega alto demais ao microfone");
             add_action(p, "Afaste o microfone do alto-falante ou baixe o volume do teclado.");
-            add_action(p, "Se necessário, reduza INPUT_GAIN no config.h.");
+            add_action(p, "Se necessario, reduza INPUT_GAIN no config.h.");
             return 1;
         default:
             return 0;
@@ -213,10 +213,10 @@ static int link_problem(DiagProblem *p) {
     }
     if (!app_state_is_paired()) return 0;
     if (recent_dropped > 0) {
-        set_title(p, UI_EV_WARN, "Rede lenta: %d eventos não puderam ser enviados ao app",
+        set_title(p, UI_EV_WARN, "Rede lenta: %d eventos nao puderam ser enviados ao app",
                   recent_dropped);
         add_action(p, "Aproxime o dispositivo e o celular do modem.");
-        add_action(p, "Desligue o envio de áudio bruto (Menu 3 > 5), se estiver ligado.");
+        add_action(p, "Desligue o envio de audio bruto (Menu 3 > 5), se estiver ligado.");
         return 1;
     }
     if (recent_errors > 5) {
@@ -234,7 +234,7 @@ static int pairing_hint(DiagProblem *p) {
     hal_wifi_ip_str(ip, sizeof(ip));
     set_title(p, UI_EV_INFO, "Pronto. Aguardando o app se conectar");
     add_action(p, "No app: Conectar dispositivo > Buscar (celular na mesma rede Wi-Fi).");
-    add_action(p, "Não apareceu? Use \"Conectar pelo IP\" com %s.", ip);
+    add_action(p, "Nao apareceu? Use \"Conectar pelo IP\" com %s.", ip);
     return 1;
 }
 

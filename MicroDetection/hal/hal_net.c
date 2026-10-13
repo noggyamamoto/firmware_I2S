@@ -170,7 +170,7 @@ static bool ws_send(int fd, const void *data, size_t len) {
 #else
 
 static bool ws_open(void) {
-    ESP_LOGW(TAG, "WebSocket desativado (CONFIG_HTTPD_WS_SUPPORT): app web indisponível");
+    ESP_LOGW(TAG, "WebSocket desativado (CONFIG_HTTPD_WS_SUPPORT): app web indisponivel");
     return true;
 }
 

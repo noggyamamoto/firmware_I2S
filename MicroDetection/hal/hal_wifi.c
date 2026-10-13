@@ -165,7 +165,7 @@ static void start_ap_fallback(void) {
     if (s_ap_active) return;
     drv_wifi_enable_ap(s_device_name, WIFI_AP_PASS, WIFI_AP_CHANNEL);
     s_ap_active = true;
-    ESP_LOGW(TAG, "Rede \"%s\" indisponível. Rede própria ativa: \"%s\" (senha: %s, IP 192.168.4.1)",
+    ESP_LOGW(TAG, "Rede \"%s\" indisponivel. Rede propria ativa: \"%s\" (senha: %s, IP 192.168.4.1)",
              s_cred.ssid, s_device_name, WIFI_AP_PASS);
     if (configured()) hal_timer_start_periodic(s_retry_timer, AP_RETRY_PERIOD_US);
 }
@@ -182,7 +182,7 @@ static void retry_timer_cb(void *arg) {
 static void dhcp_timer_cb(void *arg) {
     (void)arg;
     if (s_connected || s_stopping) return;
-    ESP_LOGW(TAG, "Associado a \"%s\", mas sem IP após %d s (DHCP)", s_cred.ssid,
+    ESP_LOGW(TAG, "Associado a \"%s\", mas sem IP apos %d s (DHCP)", s_cred.ssid,
              WIFI_DHCP_TIMEOUT_MS / 1000);
     s_dhcp_failed = true;
     drv_wifi_disconnect();                          // Gera STA_DISCONNECTED -> nova tentativa
@@ -213,7 +213,7 @@ static void handle_disconnect(uint16_t reason) {
     int attempt = s_retries;
     UNLOCK();
 
-    ESP_LOGW(TAG, "Falha na conexão com \"%s\" (motivo %u, causa %d), tentativa %d de %d",
+    ESP_LOGW(TAG, "Falha na conexao com \"%s\" (motivo %u, causa %d), tentativa %d de %d",
              s_cred.ssid, reason, err, attempt, max_attempts(err));
 
     if (s_ap_active) {                              // Modo AP: o timer periódico cuida
@@ -267,14 +267,14 @@ static void on_event(DrvWifiEvent event, uint32_t arg) {
             LOCK();
             s_ap_clients++;
             UNLOCK();
-            ESP_LOGI(TAG, "Um dispositivo entrou na rede própria");
+            ESP_LOGI(TAG, "Um dispositivo entrou na rede propria");
             break;
 
         case DRV_WIFI_EVENT_AP_CLIENT_LEFT:
             LOCK();
             if (s_ap_clients > 0) s_ap_clients--;
             UNLOCK();
-            ESP_LOGI(TAG, "Um dispositivo saiu da rede própria");
+            ESP_LOGI(TAG, "Um dispositivo saiu da rede propria");
             break;
     }
 }
@@ -313,7 +313,7 @@ static void begin_connect(void) {
     s_retries = 0;
     UNLOCK();
     if (err != HAL_WIFI_ERR_NONE) {
-        ESP_LOGW(TAG, "Wi-Fi não iniciado (causa %d): use o menu serial, opção Rede Wi-Fi", err);
+        ESP_LOGW(TAG, "Wi-Fi nao iniciado (causa %d): use o menu serial, opcao Rede Wi-Fi", err);
         start_ap_fallback();
         notify();
         return;
@@ -342,7 +342,7 @@ bool hal_wifi_start(const WifiCredentials *cred, hal_wifi_state_cb on_state) {
     // RFE01: varre as redes antes de conectar (o resultado ajuda no diagnóstico)
     int found = scan_and_store();
     ESP_LOGI(TAG, "%d redes encontradas; \"%s\" %s", found, s_cred.ssid,
-             s_seen ? "visível" : "não encontrada");
+             s_seen ? "visivel" : "nao encontrada");
 
     begin_connect();
     return true;

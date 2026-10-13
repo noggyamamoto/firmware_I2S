@@ -253,7 +253,7 @@ static void handle_packet(const NetPeer *from, const uint8_t *buf, size_t size) 
 static void watchdog_cb(void *arg) {
     (void)arg;
     if (app_state_is_paired() && app_state_ms_since_touch() > SESSION_TIMEOUT_MS) {
-        ESP_LOGW(TAG, "App sem resposta há %d ms, desconectando", SESSION_TIMEOUT_MS);
+        ESP_LOGW(TAG, "App sem resposta ha %d ms, desconectando", SESSION_TIMEOUT_MS);
         s_timeouts++;
         ui_event(UI_EV_WARN, "App parou de responder (%d s sem sinal): pareamento desfeito",
                  SESSION_TIMEOUT_MS / 1000);
