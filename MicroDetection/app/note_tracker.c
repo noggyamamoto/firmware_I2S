@@ -22,8 +22,8 @@ void note_tracker_default_config(NoteTrackerConfig *cfg) {
     cfg->onset_timeout_hops = 8;
     cfg->release_hops = 2;
     cfg->quantize_ms = 10;
-    cfg->min_midi = 60;                                 // C4
-    cfg->max_midi = 96;                                 // C7
+    cfg->min_midi = 21;                                 // A0
+    cfg->max_midi = 108;                                // C8
 }
 
 void note_tracker_init(NoteTracker *t, const NoteTrackerConfig *cfg) {
@@ -165,6 +165,15 @@ static void abort_candidate(NoteTracker *t) {
     }
 }
 
+/* `freq` é múltiplo ou submúltiplo inteiro (2 a 8, ±3%) da nota ativa. */
+static bool harmonic_of_active(const NoteTracker *t, float freq) {
+    if (t->active_freq_count <= 0 || freq <= 0.0f) return false;
+    float active = t->active_freq_sum / (float)t->active_freq_count;
+    float r = freq > active ? freq / active : active / freq;
+    int k = (int)lroundf(r);
+    return k >= 2 && k <= 8 && fabsf(r - (float)k) <= 0.03f * (float)k;
+}
+
 int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                          float freq_hz, float confidence, NoteEvent out[2]) {
     int n = 0;
@@ -172,7 +181,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
     const float release = gate - t->cfg.release_hysteresis_db;
     const bool masked = hop_start_ms >= t->mask_from_ms && hop_start_ms < t->mask_until_ms;
     // Som periódico (tem altura) e, entre eles, os que estão na faixa aceita.
-    // Um som periódico fora da faixa (abaixo do C4) não vira nota, mas também
+    // Um som periódico fora da faixa (do piano) não vira nota, mas também
     // não é tratado como ruído no aprendizado do piso.
     const bool pitched = freq_hz > 0.0f && confidence >= t->cfg.min_confidence;
     int midi_now = pitched ? (int)lroundf(dsp_hz_to_midi(freq_hz)) : -1;
@@ -217,8 +226,12 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                 abort_candidate(t);
                 break;
             }
-            // Um salto de energia dentro do candidato indica o ataque verdadeiro
-            if (!t->cand_over_active && jump >= t->cfg.reattack_db && t->stable_count == 0) {
+            // Um salto de energia logo no início do candidato indica o ataque
+            // verdadeiro. Só nos primeiros trechos: em notas muito graves (A0
+            // tem período de 36 ms, maior que o trecho de 16 ms) o nível oscila
+            // enquanto a altura é confirmada e o ataque seria empurrado
+            if (!t->cand_over_active && jump >= t->cfg.reattack_db && t->stable_count == 0 &&
+                t->cand_hops <= 2) {
                 t->cand_time_ms = hop_start_ms;
             }
             if (hop_db > t->cand_peak_db) t->cand_peak_db = hop_db;
@@ -262,8 +275,15 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
             t->low_count = 0;
             if (hop_db > t->active_peak_db) t->active_peak_db = hop_db;
 
-            // 3) Troca de altura sem novo ataque (legato)
-            if (voiced && midi_now != t->active_midi) {
+            // 3) Troca de altura sem novo ataque (legato). Uma "troca" para um
+            //    múltiplo ou submúltiplo exato da nota que soa (2x a 8x) sem
+            //    ataque é artefato da análise (harmônico ou período longo no
+            //    decaimento com ruído), não uma nota nova: no piano toda nota
+            //    nova tem ataque, tratado no item 1.
+            if (voiced && midi_now != t->active_midi && harmonic_of_active(t, freq_hz)) {
+                t->change_count = 0;
+                t->change_midi = -1;
+            } else if (voiced && midi_now != t->active_midi) {
                 if (midi_now == t->change_midi) {
                     t->change_count++;
                 } else {
