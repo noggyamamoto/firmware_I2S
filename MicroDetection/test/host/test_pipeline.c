@@ -94,7 +94,8 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
         memcpy(window + WINDOW - HOP, hop, sizeof(hop));
         uint32_t t_ms = (uint32_t)(pos * 1000 / FS);
         while (ci < n_clicks && clicks[ci] * 1000 <= t_ms + 16) {
-            note_tracker_mask_until(&tr, (uint32_t)(clicks[ci] * 1000) + 45, 1760.0f);
+            uint32_t c = (uint32_t)(clicks[ci] * 1000);
+            note_tracker_mask(&tr, c > 16 ? c - 16 : 0, c + 45, 1760.0f);
             ci++;
         }
         float conf = 0;
@@ -183,6 +184,16 @@ int main(void) {
         {91, 0.60, 0.30},
     };
     run_case("fusas a 100 BPM (G6-B6)", fusas, 5, 1.3, -80.0, 0.05, NULL, 0, 0);
+
+    // Nota longa com cliques de metronomo por cima: os cliques nao podem
+    // virar um "reataque" (nota repetida falsa)
+    const Expected sustained[] = {{64, 0.20, 1.60}};
+    const double clicks_over[] = {0.6, 1.0, 1.4};
+    run_case("nota longa com cliques por cima", sustained, 1, 2.2, -80.0, 0.05, clicks_over, 3, 0);
+
+    // Mesma nota repetida rapidamente (tecla solta por ~40 ms entre os ataques)
+    const Expected repeated[] = {{67, 0.30, 0.36}, {67, 0.70, 0.36}, {67, 1.10, 0.50}};
+    run_case("nota repetida rapidamente", repeated, 3, 2.0, -80.0, 0.05, NULL, 0, 0);
 
     // Notas abaixo do C4 (A3 e F3) nao geram nota; a seguinte (C4) sim
     const Expected low_played[] = {{57, 0.3, 0.5}, {53, 1.0, 0.5}, {60, 1.7, 0.5}};

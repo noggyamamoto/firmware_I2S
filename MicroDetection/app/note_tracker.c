@@ -36,6 +36,7 @@ void note_tracker_init(NoteTracker *t, const NoteTrackerConfig *cfg) {
 
 void note_tracker_reset(NoteTracker *t) {
     t->state = TRACKER_IDLE;
+    t->mask_from_ms = 0;
     t->mask_until_ms = 0;
     t->mask_pitch_class = -1;
     t->active_midi = -1;
@@ -47,6 +48,12 @@ void note_tracker_reset(NoteTracker *t) {
 
 void note_tracker_mask_until(NoteTracker *t, uint32_t until_ms, float click_hz) {
     if (until_ms > t->mask_until_ms) t->mask_until_ms = until_ms;
+    t->mask_pitch_class = click_hz > 0.0f ? ((int)lroundf(dsp_hz_to_midi(click_hz)) % 12) : -1;
+}
+
+void note_tracker_mask(NoteTracker *t, uint32_t from_ms, uint32_t until_ms, float click_hz) {
+    t->mask_from_ms = from_ms;
+    t->mask_until_ms = until_ms;
     t->mask_pitch_class = click_hz > 0.0f ? ((int)lroundf(dsp_hz_to_midi(click_hz)) % 12) : -1;
 }
 
@@ -163,7 +170,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
     int n = 0;
     const float gate = note_tracker_gate_db(t);
     const float release = gate - t->cfg.release_hysteresis_db;
-    const bool masked = hop_start_ms < t->mask_until_ms;
+    const bool masked = hop_start_ms >= t->mask_from_ms && hop_start_ms < t->mask_until_ms;
     // Som periódico (tem altura) e, entre eles, os que estão na faixa aceita.
     // Um som periódico fora da faixa (abaixo do C4) não vira nota, mas também
     // não é tratado como ruído no aprendizado do piso.
@@ -181,7 +188,10 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
 
     switch (t->state) {
         case TRACKER_IDLE:
-            update_noise_floor(t, hop_db, pitched);
+            // O clique do metrônomo (sempre presente na contagem de entrada)
+            // não pode elevar o piso de ruído: o limiar subiria e as primeiras
+            // notas da música, mais fracas, deixariam de ser detectadas
+            if (!masked) update_noise_floor(t, hop_db, pitched);
             if (hop_db >= note_tracker_gate_db(t)) {
                 start_candidate(t, hop_start_ms, hop_db, false);
                 if (voiced) candidate_add_pitch(t, midi_now, freq_hz, confidence);
@@ -200,6 +210,13 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                 break;
             }
             t->cand_hops++;
+            // Reataque sobre uma nota que soa: um transiente curto (clique do
+            // metrônomo, do app ou batida no móvel) some na janela seguinte;
+            // um ataque verdadeiro mantém o nível. Volta à nota anterior.
+            if (t->cand_over_active && hop_db < t->cand_peak_db - t->cfg.reattack_db) {
+                abort_candidate(t);
+                break;
+            }
             // Um salto de energia dentro do candidato indica o ataque verdadeiro
             if (!t->cand_over_active && jump >= t->cfg.reattack_db && t->stable_count == 0) {
                 t->cand_time_ms = hop_start_ms;
@@ -207,7 +224,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
             if (hop_db > t->cand_peak_db) t->cand_peak_db = hop_db;
             if (voiced) {
                 candidate_add_pitch(t, midi_now, freq_hz, confidence);
-            } else if (!t->cand_over_active && !pitched) {
+            } else if (!t->cand_over_active && !pitched && !masked) {
                 update_noise_floor(t, hop_db, false);   // Ruído sem altura: ajusta o limiar
             }
 

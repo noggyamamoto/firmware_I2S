@@ -30,6 +30,7 @@ static float           s_yin_diff[WINDOW_SAMPLES / 2 + 1];
 static float           s_hop[HOP_SAMPLES];          // Trecho mais recente
 
 static portMUX_TYPE    s_mask_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t        s_mask_from_ms = 0;
 static uint32_t        s_mask_until_ms = 0;
 static float           s_mask_hz = 0.0f;
 static bool            s_mask_pending = false;
@@ -85,9 +86,13 @@ bool audio_pipeline_init(void) {
     return true;
 }
 
-void audio_pipeline_mask_click(uint32_t until_ms, float click_hz) {
+void audio_pipeline_mask_click(uint32_t click_ms, float click_hz) {
+    // A janela de análise (32 ms) termina no fim do trecho (16 ms): o clique
+    // aparece nos trechos que começam até 16 ms antes dele
+    const uint32_t hop_ms = HOP_SAMPLES * 1000 / SAMPLE_RATE;
     portENTER_CRITICAL(&s_mask_lock);
-    s_mask_until_ms = until_ms;
+    s_mask_from_ms = click_ms > hop_ms ? click_ms - hop_ms : 0;
+    s_mask_until_ms = click_ms + CLICK_MASK_MS;
     s_mask_hz = click_hz;
     s_mask_pending = true;
     portEXIT_CRITICAL(&s_mask_lock);
@@ -222,11 +227,12 @@ static void audio_task(void *arg) {
         // Máscara do clique do metrônomo
         portENTER_CRITICAL(&s_mask_lock);
         bool mask = s_mask_pending;
+        uint32_t mask_from = s_mask_from_ms;
         uint32_t mask_until = s_mask_until_ms;
         float mask_hz = s_mask_hz;
         s_mask_pending = false;
         portEXIT_CRITICAL(&s_mask_lock);
-        if (mask) note_tracker_mask_until(&s_tracker, mask_until, mask_hz);
+        if (mask) note_tracker_mask(&s_tracker, mask_from, mask_until, mask_hz);
 
         // 5) Segmentação em notas (somente trechos após o início da sessão)
         NoteEvent events[2];

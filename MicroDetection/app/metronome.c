@@ -91,7 +91,7 @@ static void beat_cb(void *arg) {
     if ((flags & CFG_FLAG_METRO_SOUND) || count_in) {
         float hz = accent ? CLICK_ACCENT_HZ : CLICK_BEAT_HZ;
         hal_buzzer_beep((uint32_t)hz, CLICK_MS);
-        audio_pipeline_mask_click(t_ms + CLICK_MASK_MS, hz);   // Não confundir o clique com nota
+        audio_pipeline_mask_click(t_ms, hz);                   // Não confundir o clique com nota
     }
     // Luz: sempre durante a contagem (aviso visual), depois conforme a opção
     if ((flags & CFG_FLAG_METRO_VISUAL) || count_in) {

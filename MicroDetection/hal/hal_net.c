@@ -108,6 +108,17 @@ static esp_err_t ws_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* Novo cliente HTTP/WebSocket: desliga o algoritmo de Nagle. Sem isso, cada
+ * pacote pequeno (nota, batida) espera o ACK do anterior e, com o ACK
+ * atrasado do navegador (até ~200 ms), as notas chegam ao app atrasadas e
+ * fora da janela de avaliação. */
+static esp_err_t ws_on_open(httpd_handle_t hd, int sockfd) {
+    (void)hd;
+    int one = 1;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    return ESP_OK;
+}
+
 // Página simples de diagnóstico em http://IP/
 static esp_err_t root_handler(httpd_req_t *req) {
     static const char page[] =
@@ -126,6 +137,7 @@ static bool ws_open(void) {
     // Um cliente WebSocket lento não pode prender a tarefa de transmissão por
     // 5 s (padrão): enquanto ela espera, as filas de saída enchem
     cfg.send_wait_timeout = WS_SEND_TIMEOUT_S;
+    cfg.open_fn = ws_on_open;
     if (httpd_start(&s_http, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Falha ao iniciar o servidor WebSocket");
         return false;

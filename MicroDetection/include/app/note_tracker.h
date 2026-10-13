@@ -62,6 +62,7 @@ typedef struct {
     TrackerState state;
     float    noise_floor_db;        // Piso de ruído estimado
     float    prev_db;               // Nível da janela anterior
+    uint32_t mask_from_ms;          // Início da janela do clique do metrônomo
     uint32_t mask_until_ms;         // Fim da janela do clique do metrônomo
     int      mask_pitch_class;      // Classe de altura do clique (0..11) ou -1
 
@@ -104,6 +105,12 @@ void note_tracker_reset(NoteTracker *t);
  * @param click_hz Frequência do clique (0 = desconhecida).
  */
 void note_tracker_mask_until(NoteTracker *t, uint32_t until_ms, float click_hz);
+
+/**
+ * @brief Igual a note_tracker_mask_until, limitando também o início da janela
+ *        (trechos anteriores ao clique continuam com a altura normal).
+ */
+void note_tracker_mask(NoteTracker *t, uint32_t from_ms, uint32_t until_ms, float click_hz);
 
 /**
  * @brief Processa uma janela de análise.
