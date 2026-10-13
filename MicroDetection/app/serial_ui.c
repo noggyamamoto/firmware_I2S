@@ -336,6 +336,11 @@ static void reset_menu(void) {
 
 // ======================= CABEÇALHO E PAINÉIS ================================
 
+// "hhh:mm:ss": o pior caso de um uint32_t em segundos (1193046:28:15) tem
+// 13 caracteres + terminador. Com -O2 o GCC confere esse limite
+// (-Werror=format-truncation), então os buffers usam UPTIME_LEN.
+#define UPTIME_LEN 16
+
 static void format_uptime(uint32_t s, char *buf, int len) {
     snprintf(buf, len, "%02" PRIu32 ":%02" PRIu32 ":%02" PRIu32, s / 3600, (s / 60) % 60, s % 60);
 }
@@ -407,7 +412,7 @@ static void render_events(int max) {
     if (n == 0) return;
     line(ST_SOFT, " Ultimos avisos");
     for (int i = 0; i < n; i++) {
-        char t[12];
+        char t[UPTIME_LEN];
         format_uptime(ev[i].time_s, t, sizeof(t));
         bool bad = ev[i].level == UI_EV_ERROR || ev[i].level == UI_EV_WARN;
         line(bad ? ST_ERROR : ST_TEXT, "  [%s] %s", t, ev[i].text);
@@ -650,7 +655,7 @@ static void render_status(void) {
     hal_wifi_ip_str(ip, sizeof(ip));
     SessionInfo s = app_state_session();
     uint8_t flags = app_state_flags();
-    char up[12];
+    char up[UPTIME_LEN];
     format_uptime((uint32_t)(hal_time_us() / 1000000), up, sizeof(up));
     line(ST_TITLE, " STATUS DO SISTEMA" ST_SOFT "   (atualiza sozinho)");
     line(ST_TEXT, " Ligado ha:          %s", up);
