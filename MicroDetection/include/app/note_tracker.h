@@ -32,6 +32,7 @@ typedef struct {
     int      onset_timeout_hops;    // Janelas máximas aguardando altura estável
     int      release_hops;          // Janelas abaixo do limiar para soltar
     uint32_t quantize_ms;           // Grade de quantização temporal
+    int      settle_hops;           // Trechos com o NOTE_ON retido para confirmar a oitava
     int      min_midi;              // Menor nota aceita (A0 = 21); abaixo é ignorada
     int      max_midi;              // Maior nota aceita
 } NoteTrackerConfig;
@@ -84,6 +85,13 @@ typedef struct {
     int      active_freq_count;
     int      low_count;
     uint32_t low_start_ms;
+    // NOTE_ON retido enquanto a oitava é confirmada
+    bool      pending;
+    NoteEvent pending_on;
+    int       settle_left;
+    int       sub_midi;
+    int       sub_count;
+    float     sub_freq_sum;
     int      change_midi;
     int      change_count;
     uint32_t change_start_ms;
@@ -126,9 +134,10 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
 
 /**
  * @brief Encerra a nota ativa (fim da sessão).
- * @return 1 se um NOTE_OFF foi gerado.
+ * @param out Vetor com espaço para 2 eventos (NOTE_ON retido + NOTE_OFF).
+ * @return Quantidade de eventos gerados (0, 1 ou 2).
  */
-int note_tracker_flush(NoteTracker *t, uint32_t now_ms, NoteEvent *out);
+int note_tracker_flush(NoteTracker *t, uint32_t now_ms, NoteEvent out[2]);
 
 /** @brief Limiar atual de detecção (dBFS). */
 float note_tracker_gate_db(const NoteTracker *t);

@@ -35,6 +35,9 @@ int64_t hal_audio_next_sample_time_us(void);
 /** @brief Instante (µs) da primeira amostra do bloco lido por último. */
 int64_t hal_audio_block_time_us(void);
 
+/** @brief Taxa de amostragem medida (amostras/s; 0 nos 2 primeiros segundos). */
+float hal_audio_measured_rate(void);
+
 /** @brief Vezes em que o relógio de amostras foi reancorado (amostras perdidas). */
 uint32_t hal_audio_resync_count(void);
 

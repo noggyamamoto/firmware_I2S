@@ -22,6 +22,7 @@ void note_tracker_default_config(NoteTrackerConfig *cfg) {
     cfg->onset_timeout_hops = 8;
     cfg->release_hops = 2;
     cfg->quantize_ms = 10;
+    cfg->settle_hops = 3;                               // 48 ms para confirmar a oitava
     cfg->min_midi = 21;                                 // A0
     cfg->max_midi = 108;                                // C8
 }
@@ -36,6 +37,7 @@ void note_tracker_init(NoteTracker *t, const NoteTrackerConfig *cfg) {
 
 void note_tracker_reset(NoteTracker *t) {
     t->state = TRACKER_IDLE;
+    t->pending = false;
     t->mask_from_ms = 0;
     t->mask_until_ms = 0;
     t->mask_pitch_class = -1;
@@ -137,6 +139,46 @@ static void make_on(NoteTracker *t, NoteEvent *e, int midi, uint32_t time_ms,
     t->cand_over_active = false;
 }
 
+/*
+ * Início de nota com confirmação de oitava: o NOTE_ON fica retido por
+ * `settle_hops` trechos. Nos primeiros trechos a janela ainda está meio
+ * vazia e um harmônico forte pode ser lido no lugar da nota (ex.: E6 no
+ * lugar de E4 quando o som tem quase só o 4º harmônico); se nesse intervalo
+ * as leituras mostrarem um submúltiplo exato estável, a nota sai com a
+ * altura corrigida. O instante do ataque não muda.
+ * Retorna quantos eventos escreveu em `out` (0 ou 1).
+ */
+static int begin_note(NoteTracker *t, NoteEvent *out, int midi, uint32_t time_ms,
+                      float freq, float level_db, float conf) {
+    make_on(t, &t->pending_on, midi, time_ms, freq, level_db, conf);
+    t->sub_midi = -1;
+    t->sub_count = 0;
+    t->sub_freq_sum = 0.0f;
+    if (t->cfg.settle_hops <= 0) {
+        *out = t->pending_on;
+        return 1;
+    }
+    t->pending = true;
+    t->settle_left = t->cfg.settle_hops;
+    return 0;
+}
+
+/* Publica o NOTE_ON retido (antes de qualquer NOTE_OFF ou nova nota). */
+static int emit_pending(NoteTracker *t, NoteEvent *out) {
+    if (!t->pending) return 0;
+    t->pending = false;
+    *out = t->pending_on;
+    return 1;
+}
+
+/* `freq` é submúltiplo exato (1/2 a 1/8, ±3%) da nota ativa. */
+static bool submultiple_of_active(const NoteTracker *t, float freq) {
+    if (t->active_freq_count <= 0 || freq <= 0.0f) return false;
+    float r = (t->active_freq_sum / (float)t->active_freq_count) / freq;
+    int k = (int)lroundf(r);
+    return k >= 2 && k <= 8 && fabsf(r - (float)k) <= 0.03f * (float)k;
+}
+
 static void make_off(NoteTracker *t, NoteEvent *e, uint32_t time_ms) {
     uint32_t off = quantize(t, time_ms);
     if (off < t->active_on_ms) off = t->active_on_ms;
@@ -212,6 +254,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                 if (t->cand_over_active) {
                     // A nota anterior terminou enquanto o candidato era avaliado
                     t->state = TRACKER_ACTIVE;
+                    n += emit_pending(t, &out[n]);
                     make_off(t, &out[n++], t->cand_time_ms);
                 } else {
                     t->state = TRACKER_IDLE;            // Ruído impulsivo: descarta
@@ -244,10 +287,11 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
             if (t->stable_count >= t->cfg.stable_hops) {
                 float cnt = (float)t->stable_count;
                 if (t->cand_over_active) {
+                    n += emit_pending(t, &out[n]);
                     make_off(t, &out[n++], t->cand_time_ms);   // Encerra a nota anterior
                 }
-                make_on(t, &out[n++], t->stable_midi, t->cand_time_ms,
-                        t->cand_freq_sum / cnt, t->cand_peak_db, t->cand_conf_sum / cnt);
+                n += begin_note(t, &out[n], t->stable_midi, t->cand_time_ms,
+                                t->cand_freq_sum / cnt, t->cand_peak_db, t->cand_conf_sum / cnt);
             } else if (t->cand_hops >= t->cfg.onset_timeout_hops) {
                 abort_candidate(t);                     // Som sem altura definida
             }
@@ -257,6 +301,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
             // 1) Novo ataque sobre a nota que ainda soa (ex.: nota repetida).
             //    A nota anterior só é encerrada quando a nova altura se confirmar.
             if (jump >= t->cfg.reattack_db && hop_db >= gate) {
+                n += emit_pending(t, &out[n]);          // A nota que soa já é definitiva
                 start_candidate(t, hop_start_ms, hop_db, true);
                 if (voiced) candidate_add_pitch(t, midi_now, freq_hz, confidence);
                 break;
@@ -268,12 +313,40 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                 if (t->low_count == 0) t->low_start_ms = hop_start_ms;
                 t->low_count++;
                 if (t->low_count >= t->cfg.release_hops) {
+                    n += emit_pending(t, &out[n]);
                     make_off(t, &out[n++], t->low_start_ms);
                 }
                 break;
             }
             t->low_count = 0;
             if (hop_db > t->active_peak_db) t->active_peak_db = hop_db;
+
+            // Confirmação da oitava (NOTE_ON retido): submúltiplo exato e
+            // estável da altura lida no ataque corrige a nota
+            if (t->pending) {
+                if (voiced && submultiple_of_active(t, freq_hz)) {
+                    if (midi_now == t->sub_midi) {
+                        t->sub_count++;
+                        t->sub_freq_sum += freq_hz;
+                    } else {
+                        t->sub_midi = midi_now;
+                        t->sub_count = 1;
+                        t->sub_freq_sum = freq_hz;
+                    }
+                    if (t->sub_count >= 2) {
+                        float f = t->sub_freq_sum / (float)t->sub_count;
+                        t->active_midi = t->sub_midi;
+                        t->active_freq_sum = f;
+                        t->active_freq_count = 1;
+                        t->pending_on.midi = (uint8_t)t->sub_midi;
+                        t->pending_on.frequency_hz = f;
+                        t->sub_count = 0;
+                        t->sub_midi = -1;
+                    }
+                }
+                if (--t->settle_left <= 0) n += emit_pending(t, &out[n]);
+                if (t->pending) break;                  // Sem troca de altura enquanto retido
+            }
 
             // 3) Troca de altura sem novo ataque (legato). Uma "troca" para um
             //    múltiplo ou submúltiplo exato da nota que soa (2x a 8x) sem
@@ -295,7 +368,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                     uint32_t at = t->change_start_ms;
                     int new_midi = t->change_midi;
                     make_off(t, &out[n++], at);
-                    make_on(t, &out[n++], new_midi, at, freq_hz, hop_db, confidence);
+                    n += begin_note(t, &out[n], new_midi, at, freq_hz, hop_db, confidence);
                 }
             } else if (voiced) {
                 t->change_count = 0;
@@ -311,12 +384,14 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
     return n;
 }
 
-int note_tracker_flush(NoteTracker *t, uint32_t now_ms, NoteEvent *out) {
+int note_tracker_flush(NoteTracker *t, uint32_t now_ms, NoteEvent out[2]) {
     if (t->state == TRACKER_ACTIVE || (t->state == TRACKER_CANDIDATE && t->cand_over_active)) {
+        int n = emit_pending(t, &out[0]);
         t->state = TRACKER_ACTIVE;
-        make_off(t, out, now_ms);
-        return 1;
+        make_off(t, &out[n++], now_ms);
+        return n;
     }
+    t->pending = false;
     t->state = TRACKER_IDLE;
     return 0;
 }

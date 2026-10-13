@@ -518,6 +518,9 @@ static void enter_execution(void) {
                        app_state_is_paired() ? app_state_peer_name() : "(nenhum)", ip, ST_RESET);
     hal_console_printf("%s  ESPERADO = nota da partitura na hora certa  |  CAPTADO = nota do "
                        "microfone%s\r\n", ST_SOFT, ST_RESET);
+    hal_console_printf("%s  Microfone: %.0f amostras/s medidas (configurada %d) | [f/2, f/4] = energia "
+                       "1 e 2 oitavas abaixo%s\r\n", ST_SOFT, audio_pipeline_measured_rate(),
+                       SAMPLE_RATE, ST_RESET);
     hal_console_printf("%s  ESC volta ao menu (o monitor continua em Captura e audio > 6)%s\r\n\r\n",
                        ST_SOFT, ST_RESET);
 }
@@ -682,6 +685,8 @@ static void render_status(void) {
          audio_pipeline_process_time_us(), HOP_SAMPLES * 1000 / SAMPLE_RATE);
     line(ST_TEXT, " Relogio do audio:   %" PRIu32 " correcoes (amostras perdidas)",
          audio_pipeline_clock_resyncs());
+    line(ST_TEXT, " Taxa do microfone:  %.0f amostras/s medidas (configurada: %d)",
+         audio_pipeline_measured_rate(), SAMPLE_RATE);
     line(ST_TEXT, " Memoria livre:      %" PRIu32 " bytes", hal_system_free_heap());
     rule();
     render_problems(2);

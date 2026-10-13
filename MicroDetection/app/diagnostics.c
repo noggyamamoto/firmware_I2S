@@ -169,6 +169,13 @@ static int wifi_problem(DiagProblem *p) {
 }
 
 static int mic_problem(DiagProblem *p) {
+    const float rate = audio_pipeline_measured_rate();
+    if (rate > 0.0f && audio_pipeline_rate_scale() != 1.0f) {
+        set_title(p, UI_EV_WARN, "Microfone a %.0f amostras/s (configurado: %d)", rate, SAMPLE_RATE);
+        add_action(p, "As alturas estao sendo corrigidas pela taxa medida.");
+        add_action(p, "Confira os fios SCK/WS do INMP441 e a placa escolhida no PlatformIO.");
+        return 1;
+    }
     switch (audio_pipeline_mic_status()) {
         case MIC_STATUS_NO_SIGNAL:
             set_title(p, UI_EV_ERROR, "Microfone sem sinal: nenhuma nota sera detectada");

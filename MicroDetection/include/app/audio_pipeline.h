@@ -38,6 +38,15 @@ void audio_pipeline_mask_click(uint32_t click_ms, float click_hz);
 /** @brief Carga média de processamento por janela (µs), para diagnóstico. */
 uint32_t audio_pipeline_process_time_us(void);
 
+/** @brief Taxa de amostragem medida do microfone (amostras/s; 0 no início). */
+float audio_pipeline_measured_rate(void);
+
+/**
+ * @brief Fator aplicado às alturas: taxa medida / SAMPLE_RATE quando a taxa
+ *        real do I2S difere mais de 10% da configurada; senão 1.
+ */
+float audio_pipeline_rate_scale(void);
+
 /** @brief Afinador: nível (dB) em f/4, f/3, f/2, f e 2f da última altura detectada. */
 void audio_pipeline_harmonic_levels(float out_db[PITCH_PROBE_COUNT]);
 

@@ -18,6 +18,14 @@ static int64_t s_start_us = 0;          // Instante da amostra 0 (reancorado qua
 static int64_t s_block_us = 0;          // Instante da primeira amostra do último bloco lido
 static volatile uint32_t s_resyncs = 0; // Vezes em que o relógio de amostras foi corrigido
 
+// Taxa de amostragem medida (amostras recebidas / tempo do sistema), a cada
+// RATE_WINDOW_US. Confere se o I2S entrega de fato SAMPLE_RATE amostras por
+// segundo: uma taxa diferente desloca todas as alturas (ex.: 4x = 2 oitavas)
+#define RATE_WINDOW_US  2000000
+static uint64_t s_rate_samples = 0;     // Amostras desde s_rate_t0
+static int64_t s_rate_t0 = 0;
+static volatile float s_rate_measured = 0.0f;
+
 // O DMA guarda no máximo ~96 ms de áudio (6 x 256 amostras). Se a última
 // amostra lida está mais "velha" do que isso, amostras foram perdidas (tarefa
 // atrasada); se está no futuro, o relógio do I2S anda diferente do sistema.
@@ -43,6 +51,8 @@ bool hal_audio_start(void) {
     if (!drv_i2s_mic_start()) return false;
     s_samples_read = 0;
     s_start_us = hal_time_us();
+    s_rate_t0 = s_start_us;
+    s_rate_samples = 0;
     return true;
 }
 
@@ -53,6 +63,13 @@ void hal_audio_stop(void) {
 size_t hal_audio_read(float *out, size_t n, uint32_t timeout_ms) {
     if (n > s_capacity) return 0;
     size_t got = drv_i2s_mic_read(s_raw, n, timeout_ms);
+    s_rate_samples += got;
+    int64_t t = hal_time_us();
+    if (t - s_rate_t0 >= RATE_WINDOW_US) {
+        s_rate_measured = (float)((double)s_rate_samples * 1e6 / (double)(t - s_rate_t0));
+        s_rate_t0 = t;
+        s_rate_samples = 0;
+    }
     if (got != n) {
         s_samples_read += got;                  // Mantém o relógio alinhado ao DMA
         return 0;
@@ -78,6 +95,10 @@ int64_t hal_audio_next_sample_time_us(void) {
 
 int64_t hal_audio_block_time_us(void) {
     return s_block_us;
+}
+
+float hal_audio_measured_rate(void) {
+    return s_rate_measured;
 }
 
 uint32_t hal_audio_resync_count(void) {

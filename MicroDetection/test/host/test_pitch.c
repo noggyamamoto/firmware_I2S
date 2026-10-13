@@ -40,6 +40,11 @@ static const Profile PROFILES[] = {
     // que corta abaixo de ~1,2 kHz (E4 so com o 4o harmonico forte). Abaixo
     // do A3 todos os harmonicos audiveis ficariam abaixo do corte.
     {"alto-falante pequeno", {0}, 57, 96, 1200.0f},
+    // Caso real (v1.3.1 na placa): C4, D4, E4, F4 e G4 lidos duas oitavas
+    // acima. O som tinha praticamente so o 4o harmonico; as componentes da
+    // nota (f, 3f, 5f...) chegavam ~36 dB abaixo dele. Acima do C5 um
+    // alto-falante pequeno ja reproduz a propria nota (> 1 kHz)
+    {"harmonico quase isolado", {0.015f, 0.015f, 0.015f, 1.0f, 0.015f, 0.01f, 0.01f, 0.01f}, 38, 72, 0},
 };
 
 /* Ganho de um alto-falante pequeno: passa-alta de 16a ordem + ressonancia. */

@@ -41,6 +41,8 @@ typedef struct {
 
 static ExpEntry  s_exp[EXP_SLOTS];
 static NoteEvent s_cap[CAP_SLOTS];
+static float     s_cap_probe[CAP_SLOTS][2];     // Energia em f/2 e f/4 (dB)
+static bool      s_cap_has_probe[CAP_SLOTS];
 static int       s_cap_head = 0, s_cap_count = 0;
 static uint32_t  s_cap_lost = 0;
 
@@ -154,11 +156,17 @@ void execution_monitor_expected(uint16_t index, uint8_t midi, uint32_t onset_ms,
     UNLOCK();
 }
 
-void execution_monitor_captured(const NoteEvent *ev) {
+void execution_monitor_captured(const NoteEvent *ev, const float *probe_half_quarter_db) {
     LOCK();
     if (s_run.active) {
         if (s_cap_count < CAP_SLOTS) {
-            s_cap[(s_cap_head + s_cap_count) % CAP_SLOTS] = *ev;
+            int slot = (s_cap_head + s_cap_count) % CAP_SLOTS;
+            s_cap[slot] = *ev;
+            s_cap_has_probe[slot] = probe_half_quarter_db != NULL;
+            if (probe_half_quarter_db) {
+                s_cap_probe[slot][0] = probe_half_quarter_db[0];
+                s_cap_probe[slot][1] = probe_half_quarter_db[1];
+            }
             s_cap_count++;
         } else {
             s_cap_lost++;                       // Menu nao acompanhou: so o log perde
@@ -189,6 +197,8 @@ typedef struct {
     bool     captured;                          // false = nota esperada
     ExpEntry exp;
     NoteEvent cap;
+    bool     has_probe;
+    float    probe[2];                          // f/2 e f/4 (dB)
 } Item;
 
 static int cmp_item(const void *a, const void *b) {
@@ -246,6 +256,9 @@ int execution_monitor_poll(uint32_t session_ms, char (*out)[EXEC_MONITOR_LINE_LE
     while (s_cap_count > 0 && n_items < (int)(sizeof(items) / sizeof(items[0]))) {
         Item *it = &items[n_items++];
         it->cap = s_cap[s_cap_head];
+        it->has_probe = s_cap_has_probe[s_cap_head];
+        it->probe[0] = s_cap_probe[s_cap_head][0];
+        it->probe[1] = s_cap_probe[s_cap_head][1];
         it->time_ms = it->cap.time_ms;
         it->captured = true;
         s_cap_head = (s_cap_head + 1) % CAP_SLOTS;
@@ -315,8 +328,14 @@ int execution_monitor_poll(uint32_t session_ms, char (*out)[EXEC_MONITOR_LINE_LE
             }
             char hz[16];
             snprintf(hz, sizeof(hz), "%.1f Hz", e->frequency_hz);
-            snprintf(out[n++], EXEC_MONITOR_LINE_LEN, "CAPTADO       %-4s %-22s t=%6lu ms  %s",
-                     name, hz, (unsigned long)e->time_ms, verdict);
+            // Diagnóstico: energia uma e duas oitavas abaixo da nota captada
+            char probe[40] = "";
+            if (it->has_probe) {
+                snprintf(probe, sizeof(probe), "  [f/2 %.0f dB, f/4 %.0f dB]", it->probe[0],
+                         it->probe[1]);
+            }
+            snprintf(out[n++], EXEC_MONITOR_LINE_LEN, "CAPTADO       %-4s %-22s t=%6lu ms  %s%s",
+                     name, hz, (unsigned long)e->time_ms, verdict, probe);
         } else {
             bool exact;
             const char *fig = execution_monitor_figure_name(e->duration_ms / quarter_ms, &exact);
