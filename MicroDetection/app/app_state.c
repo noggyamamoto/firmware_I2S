@@ -10,6 +10,7 @@
 #include "esp_log.h"
 
 #include "config.h"
+#include "execution_monitor.h"
 #include "hal_indicators.h"
 #include "hal_time.h"
 #include "hal_wifi.h"
@@ -132,14 +133,14 @@ bool app_state_session_start(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_
     }
     UNLOCK();
     if (duplicate) {
-        ESP_LOGI(TAG, "SESSION_START repetido (sessão %u): ignorado", session_id);
+        ESP_LOGI(TAG, "SESSION_START repetido (sessao %u): ignorado", session_id);
         return false;
     }
     metronome_start(bpm, beats_per_bar, count_in_bars, flags, now, session_id);
-    ESP_LOGI(TAG, "Sessão iniciada: %u BPM, %u tempos, %u compassos de contagem",
+    ESP_LOGI(TAG, "Sessao iniciada: %u BPM, %u tempos, %u compassos de contagem",
              bpm, beats_per_bar, count_in_bars);
     ui_event(UI_EV_INFO, "%s iniciada: %u BPM, %u tempos por compasso",
-             local ? "Captura local" : "Execução", bpm, beats_per_bar);
+             local ? "Captura local" : "Execucao", bpm, beats_per_bar);
     return true;
 }
 
@@ -151,8 +152,9 @@ void app_state_session_stop(void) {
     UNLOCK();
     if (was) {
         metronome_stop();
-        ESP_LOGI(TAG, "Sessão encerrada");
-        ui_event(UI_EV_INFO, "Execução encerrada");
+        execution_monitor_session_stop();
+        ESP_LOGI(TAG, "Sessao encerrada");
+        ui_event(UI_EV_INFO, "Execucao encerrada");
     }
 }
 

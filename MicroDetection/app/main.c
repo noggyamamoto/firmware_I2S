@@ -34,12 +34,14 @@
 #include "diagnostics.h"
 #include "hal_console.h"
 #include "hal_indicators.h"
+#include "hal_net.h"
 #include "hal_storage.h"
 #include "hal_wifi.h"
 #include "link_service.h"
 #include "metronome.h"
 #include "serial_ui.h"
 #include "ui_events.h"
+#include "wifi_setup.h"
 
 static const char *TAG = "main";
 
@@ -56,17 +58,23 @@ static void fatal(const char *what, const char *action) {
 static void on_wifi_state(HalWifiState state) {
     static HalWifiState last_state = HAL_WIFI_CONNECTING;
     static HalWifiError last_error = HAL_WIFI_ERR_NONE;
+    static bool last_fallback = false;
     app_state_refresh_status_led();
 
     HalWifiDiag d;
     hal_wifi_get_diag(&d);
+    if (d.on_fallback && !last_fallback) {
+        ui_event(UI_EV_WARN, "Rede \"%s\" nao conectou: usando a rede padrao \"%s\"",
+                 d.primary_ssid, d.ssid);
+    }
+    last_fallback = d.on_fallback;
     if (state == HAL_WIFI_CONNECTED && last_state != HAL_WIFI_CONNECTED) {
         char ip[24];
         hal_wifi_ip_str(ip, sizeof(ip));
         hal_rgb_flash(0, 255, 0, 400);
         ui_event(UI_EV_OK, "Wi-Fi conectado a \"%s\" (IP %s)", d.ssid, ip);
     } else if (state == HAL_WIFI_AP_ONLY && last_state != HAL_WIFI_AP_ONLY) {
-        ui_event(UI_EV_WARN, "Rede própria ativa: \"%s\" (senha %s)", hal_wifi_device_name(),
+        ui_event(UI_EV_WARN, "Rede propria ativa: \"%s\" (senha %s)", hal_wifi_device_name(),
                  WIFI_AP_PASS);
     }
     if (d.error != last_error && d.error != HAL_WIFI_ERR_NONE) {
@@ -81,13 +89,19 @@ static void on_wifi_state(HalWifiState state) {
 void app_main(void) {
     // --- Terminal exclusivo do menu: o ESP_LOG vai para o log técnico ---
     hal_console_capture_logs();
-    if (!hal_console_init()) ESP_LOGW(TAG, "Console serial indisponível");
+    if (!hal_console_init()) ESP_LOGW(TAG, "Console serial indisponivel");
+
+    // --- Rede desejada: perguntada no terminal a cada inicialização ---
+    // (sem resposta em 15 s ou ENTER vazio: rede padrão do config.h)
+    WifiCredentials chosen, fallback;
+    hal_storage_default_wifi(&fallback);
+    wifi_setup_ask(&chosen);
     serial_ui_splash();
 
     // --- HAL: indicadores e armazenamento ---
     if (!hal_indicators_init()) ESP_LOGW(TAG, "Falha ao configurar LEDs/buzzer");
     if (!hal_storage_init()) {
-        fatal("Falha ao iniciar a memória NVS (configurações).",
+        fatal("Falha ao iniciar a memoria NVS (configuracoes).",
               "Apague a flash (PlatformIO: Platform > Erase Flash) e grave o firmware de novo.");
     }
 
@@ -98,19 +112,20 @@ void app_main(void) {
     // --- Captura e processamento de áudio ---
     // Sem microfone o restante continua funcionando; o menu explica o problema
     bool audio_ok = audio_pipeline_init();
-    if (!audio_ok) ui_event(UI_EV_ERROR, "Microfone (I2S) não iniciou: veja o diagnóstico");
+    if (!audio_ok) ui_event(UI_EV_ERROR, "Microfone (I2S) nao iniciou: veja o diagnostico");
 
-    // --- Rede ---
-    WifiCredentials cred;
-    hal_storage_load_wifi(&cred);
-    if (!hal_wifi_start(&cred, on_wifi_state)) {
-        fatal("Falha ao iniciar o rádio Wi-Fi.",
+    // --- Rede: a escolhida e, se ela falhar, a padrão ---
+    if (!hal_wifi_start(&chosen, &fallback, on_wifi_state)) {
+        fatal("Falha ao iniciar o radio Wi-Fi.",
               "Desligue e ligue o dispositivo. Se continuar, grave o firmware de novo.");
     }
     if (!link_service_init()) {
-        fatal("Falha ao abrir a comunicação com o app (UDP/WebSocket).",
+        fatal("Falha ao abrir a comunicacao com o app (UDP/WebSocket).",
               "Desligue e ligue o dispositivo. Se continuar, grave o firmware de novo.");
     }
+    // Nome fixo na rede local (partitura.local): o app encontra o dispositivo
+    // mesmo sem broadcast (navegador)
+    hal_net_advertise(MDNS_HOSTNAME, hal_wifi_device_name());
 
     // --- Tarefas ---
     if (audio_ok) audio_pipeline_start_task();

@@ -43,6 +43,16 @@ bool hal_net_init(hal_net_rx_cb on_receive);
 /** @brief Cria a tarefa de recepção UDP (núcleo 0). */
 void hal_net_start(void);
 
+/**
+ * @brief Anuncia o dispositivo na rede local por mDNS (`hostname`.local,
+ *        serviços _partitura._udp e _http._tcp). Sem efeito se o componente
+ *        mDNS não estiver no build.
+ */
+void hal_net_advertise(const char *hostname, const char *instance);
+
+/** @brief true se o build tem mDNS (nome partitura.local). */
+bool hal_net_has_mdns(void);
+
 /** @brief Envia um pacote para o app. */
 bool hal_net_send(const NetPeer *to, const void *data, size_t len);
 

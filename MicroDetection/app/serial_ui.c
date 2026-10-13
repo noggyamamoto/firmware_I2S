@@ -23,6 +23,7 @@
 #include "config.h"
 #include "diagnostics.h"
 #include "dsp.h"
+#include "execution_monitor.h"
 #include "hal_console.h"
 #include "hal_net.h"
 #include "hal_storage.h"
@@ -125,9 +126,9 @@ static void line_padded(const char *style, const char *fmt, ...) {
 static void blank(void) { line("", ""); }
 
 static void rule(void) {
-    char bar[WIDTH * 3 + 1];                            // "─" ocupa 3 bytes em UTF-8
-    for (int i = 0; i < WIDTH; i++) memcpy(bar + i * 3, "─", 3);
-    bar[WIDTH * 3] = '\0';
+    char bar[WIDTH + 1];                                // Somente ASCII (qualquer terminal)
+    memset(bar, '-', WIDTH);
+    bar[WIDTH] = '\0';
     line(ST_RULE, "%s", bar);
 }
 
@@ -275,6 +276,7 @@ typedef enum {
     SCR_NOTES,
     SCR_LOG,
     SCR_CONFIRM_RESTART,
+    SCR_EXECUTION,                      // Monitor da execução do app (texto corrido)
 } Screen;
 
 typedef enum { INPUT_SSID, INPUT_PASSWORD } InputPurpose;
@@ -329,7 +331,7 @@ static void reset_menu(void) {
     memset(&s_in, 0, sizeof(s_in));
     s_interacted = false;
     s_full_redraw = true;
-    set_notice("Menu reiniciado após %d s sem interação.", SERIAL_UI_IDLE_RESET_MS / 1000);
+    set_notice("Menu reiniciado apos %d s sem interacao.", SERIAL_UI_IDLE_RESET_MS / 1000);
 }
 
 // ======================= CABEÇALHO E PAINÉIS ================================
@@ -339,7 +341,7 @@ static void format_uptime(uint32_t s, char *buf, int len) {
 }
 
 static void render_header(void) {
-    line_padded(ST_BANNER, "  PARTITURA IoT  ·  firmware %s  ·  %s", FIRMWARE_VERSION,
+    line_padded(ST_BANNER, "  PARTITURA IoT  -  firmware %s  -  %s", FIRMWARE_VERSION,
                 hal_wifi_device_name());
 
     HalWifiDiag d;
@@ -348,11 +350,11 @@ static void render_header(void) {
     hal_wifi_ip_str(ip, sizeof(ip));
     switch (d.state) {
         case HAL_WIFI_CONNECTED:
-            line(ST_TEXT, " Wi-Fi   " ST_TITLE "conectado" ST_TEXT " a \"%s\"  ·  IP %s  ·  %d dBm",
+            line(ST_TEXT, " Wi-Fi   " ST_TITLE "conectado" ST_TEXT " a \"%s\"  -  IP %s  -  %d dBm",
                  d.ssid, ip, hal_wifi_rssi());
             break;
         case HAL_WIFI_AP_ONLY:
-            line(ST_TEXT, " Wi-Fi   " ST_ERROR "rede própria" ST_TEXT " \"%s\"  ·  IP %s",
+            line(ST_TEXT, " Wi-Fi   " ST_ERROR "rede propria" ST_TEXT " \"%s\"  -  IP %s",
                  hal_wifi_device_name(), ip);
             break;
         case HAL_WIFI_CONNECTING:
@@ -367,7 +369,7 @@ static void render_header(void) {
         line(ST_TEXT, " App     " ST_TITLE "\"%s\"" ST_TEXT " conectado (%s)", app_state_peer_name(),
              where);
     } else {
-        line(ST_TEXT, " App     " ST_SOFT "aguardando conexão");
+        line(ST_TEXT, " App     " ST_SOFT "aguardando conexao");
     }
 
     MicStatus mic = audio_pipeline_mic_status();
@@ -379,9 +381,9 @@ static void render_header(void) {
     } else if (s.local) {
         snprintf(session, sizeof(session), ST_TITLE "captura local");
     } else {
-        snprintf(session, sizeof(session), ST_TITLE "execução do app (%u BPM)", s.bpm);
+        snprintf(session, sizeof(session), ST_TITLE "execucao do app (%u BPM)", s.bpm);
     }
-    line(ST_TEXT, " Mic     %s%s" ST_TEXT "    Sessão  %s", mic_ok ? ST_TITLE : ST_ERROR,
+    line(ST_TEXT, " Mic     %s%s" ST_TEXT "    Sessao  %s", mic_ok ? ST_TITLE : ST_ERROR,
          diagnostics_mic_text(mic), session);
     rule();
 }
@@ -403,7 +405,7 @@ static void render_events(int max) {
     UiEvent ev[4];
     int n = ui_events_recent(ev, max < 4 ? max : 4);
     if (n == 0) return;
-    line(ST_SOFT, " Últimos avisos");
+    line(ST_SOFT, " Ultimos avisos");
     for (int i = 0; i < n; i++) {
         char t[12];
         format_uptime(ev[i].time_s, t, sizeof(t));
@@ -416,7 +418,7 @@ static void render_events(int max) {
 static void render_footer(const char *keys) {
     if (s_notice[0]) line(ST_KEY, " %s", s_notice);
     line(ST_SOFT, " %s", keys);
-    line(ST_SOFT, " Sem tecla por %d s, o menu volta ao início.", SERIAL_UI_IDLE_RESET_MS / 1000);
+    line(ST_SOFT, " Sem tecla por %d s, o menu volta ao inicio.", SERIAL_UI_IDLE_RESET_MS / 1000);
 }
 
 // ======================= MENUS ===============================================
@@ -441,7 +443,7 @@ static bool app_session_running(void) {
 
 static void act_scan(void) {
     if (app_session_running()) {
-        set_notice("Encerre a execução no app antes de procurar redes.");
+        set_notice("Encerre a execucao no app antes de procurar redes.");
         return;
     }
     // Mostra o aviso antes da varredura (bloqueia ~2–3 s)
@@ -462,10 +464,11 @@ static void act_type_ssid(void) {
 }
 
 static void act_reconnect(void) {
-    WifiCredentials cred;
-    hal_storage_load_wifi(&cred);
-    hal_wifi_reconnect(&cred);
-    ui_event(UI_EV_INFO, "Nova tentativa de conexão com \"%s\"", cred.ssid);
+    HalWifiDiag d;
+    hal_wifi_get_diag(&d);
+    hal_wifi_retry();                                   // Recomeça pela rede escolhida
+    ui_event(UI_EV_INFO, "Nova tentativa de conexao com \"%s\"",
+             d.primary_ssid[0] ? d.primary_ssid : d.ssid);
     go(SCR_WIFI_DETAIL);
 }
 
@@ -479,7 +482,7 @@ static const char *label_capture(void) {
 static void act_capture(void) {
     SessionInfo s = app_state_session();
     if (s.active && !s.local) {
-        set_notice("O app está em execução: a captura já está ativa.");
+        set_notice("O app esta em execucao: a captura ja esta ativa.");
     } else if (s.active) {
         app_state_session_stop();
     } else {
@@ -489,20 +492,67 @@ static void act_capture(void) {
 }
 
 static void act_notes(void) { go(SCR_NOTES); }
+
+// ======================= MONITOR DA EXECUÇÃO =================================
+// Durante a execução do app o terminal deixa de redesenhar o menu e passa a
+// mostrar, linha a linha, as notas esperadas e as captadas (rolagem normal).
+
+static bool s_exec_end_shown = false;
+
+static void enter_execution(void) {
+    s_screen = SCR_EXECUTION;
+    s_exec_end_shown = false;
+    char ip[24];
+    hal_wifi_ip_str(ip, sizeof(ip));
+#if SERIAL_UI_ANSI
+    hal_console_write("\033[?25l\033[2J\033[H");
+#endif
+    hal_console_printf("%s  PARTITURA IoT - MONITOR DA EXECUCAO  (%s)%s\r\n", ST_BANNER,
+                       hal_wifi_device_name(), ST_RESET);
+    hal_console_printf("%s  App: %s  -  IP %s%s\r\n", ST_SOFT,
+                       app_state_is_paired() ? app_state_peer_name() : "(nenhum)", ip, ST_RESET);
+    hal_console_printf("%s  ESPERADO = nota da partitura na hora certa  |  CAPTADO = nota do "
+                       "microfone%s\r\n", ST_SOFT, ST_RESET);
+    hal_console_printf("%s  ESC volta ao menu (o monitor continua em Captura e audio > 6)%s\r\n\r\n",
+                       ST_SOFT, ST_RESET);
+}
+
+static void act_exec_monitor(void) { enter_execution(); }
+
+/* Imprime as linhas novas do monitor (somente na tela da execução). */
+static void execution_tick(void) {
+    static uint32_t last_ms = 0;
+    static char lines[16][EXEC_MONITOR_LINE_LEN];
+    SessionInfo s = app_state_session();
+    if (s.active && !s.local) last_ms = app_state_session_ms();
+    int n = execution_monitor_poll(last_ms, lines, 16);
+    if (s_screen != SCR_EXECUTION) return;              // Fora da tela: descarta
+    for (int i = 0; i < n; i++) {
+        bool head = lines[i][0] == '=' || lines[i][0] == '-';
+        bool exp = lines[i][0] == 'E';
+        hal_console_printf("%s%s%s\r\n", head ? ST_TITLE : (exp ? ST_KEY : ST_TEXT), lines[i],
+                           ST_RESET);
+    }
+    if (!execution_monitor_active() && n == 0 && !s_exec_end_shown) {
+        s_exec_end_shown = true;
+        hal_console_printf("%s  Sem execucao em andamento. Tecle ENTER para voltar ao menu.%s\r\n",
+                           ST_SOFT, ST_RESET);
+    }
+}
 static void act_tuner(void) { go(SCR_TUNER); }
 
 static void act_metronome(void) {
     if (app_state_session().active) {
-        set_notice("Pare a captura/execução antes de testar o metrônomo.");
+        set_notice("Pare a captura/execucao antes de testar o metronomo.");
         return;
     }
     metronome_test(100, 4);
-    set_notice("Metrônomo de teste: 2 compassos a 100 BPM (buzzer + LED RGB).");
+    set_notice("Metronomo de teste: 2 compassos a 100 BPM (buzzer + LED RGB).");
 }
 
 static const char *label_raw_audio(void) {
-    return (app_state_flags() & CFG_FLAG_STREAM_AUDIO) ? "Envio de áudio bruto: LIGADO"
-                                                       : "Envio de áudio bruto: desligado";
+    return (app_state_flags() & CFG_FLAG_STREAM_AUDIO) ? "Envio de audio bruto: LIGADO"
+                                                       : "Envio de audio bruto: desligado";
 }
 
 static void act_raw_audio(void) {
@@ -512,8 +562,8 @@ static void act_raw_audio(void) {
 static const MenuItem MAIN_ITEMS[] = {
     {"Status do sistema", NULL, act_status, false},
     {"Rede Wi-Fi", NULL, act_wifi_menu, true},
-    {"Captura e áudio", NULL, act_audio_menu, true},
-    {"Log técnico", NULL, act_log, false},
+    {"Captura e audio", NULL, act_audio_menu, true},
+    {"Log tecnico", NULL, act_log, false},
     {"Reiniciar dispositivo", NULL, act_restart, false},
 };
 
@@ -521,15 +571,16 @@ static const MenuItem WIFI_ITEMS[] = {
     {"Escolher rede da lista", NULL, act_scan, false},
     {"Digitar o nome da rede (rede oculta)", NULL, act_type_ssid, false},
     {"Tentar conectar de novo", NULL, act_reconnect, false},
-    {"Detalhes da conexão", NULL, act_wifi_detail, false},
+    {"Detalhes da conexao", NULL, act_wifi_detail, false},
 };
 
 static const MenuItem AUDIO_ITEMS[] = {
     {NULL, label_capture, act_capture, false},
     {"Monitor de notas", NULL, act_notes, false},
-    {"Afinador e nível do microfone", NULL, act_tuner, false},
-    {"Testar metrônomo (2 compassos)", NULL, act_metronome, false},
+    {"Afinador e nivel do microfone", NULL, act_tuner, false},
+    {"Testar metronomo (2 compassos)", NULL, act_metronome, false},
     {NULL, label_raw_audio, act_raw_audio, false},
+    {"Monitor da execucao do app (esperado x captado)", NULL, act_exec_monitor, false},
 };
 
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
@@ -539,10 +590,10 @@ static void render_menu(const char *title, const MenuItem *items, int n, int sel
     for (int i = 0; i < n; i++) {
         const char *label = items[i].dynamic ? items[i].dynamic() : items[i].text;
         if (i == sel) {
-            line_padded(ST_SELECTED, "  ▸ %d  %s%s", i + 1, label, items[i].submenu ? "  ›" : "");
+            line_padded(ST_SELECTED, "  > %d  %s%s", i + 1, label, items[i].submenu ? "  >>" : "");
         } else {
             line(ST_TEXT, "    " ST_KEY "%d" ST_TEXT "  %s%s", i + 1, label,
-                 items[i].submenu ? "  ›" : "");
+                 items[i].submenu ? "  >>" : "");
         }
     }
     blank();
@@ -579,19 +630,19 @@ static void render_main(void) {
     render_problems(2);
     render_events(3);
     render_menu("MENU PRINCIPAL", MAIN_ITEMS, COUNT(MAIN_ITEMS), s_sel_main);
-    render_footer("↑/↓ mover · ENTER escolher · 1-5 atalho");
+    render_footer("Setas mover - ENTER escolhe - 1-5 atalho");
 }
 
 static void render_wifi_menu(void) {
     render_problems(1);
     render_menu("REDE WI-FI", WIFI_ITEMS, COUNT(WIFI_ITEMS), s_sel_wifi);
-    render_footer("↑/↓ mover · ENTER escolher · 1-4 atalho · ESC voltar");
+    render_footer("Setas mover - ENTER escolhe - 1-4 atalho - ESC voltar");
 }
 
 static void render_audio_menu(void) {
     render_problems(1);
-    render_menu("CAPTURA E ÁUDIO", AUDIO_ITEMS, COUNT(AUDIO_ITEMS), s_sel_audio);
-    render_footer("↑/↓ mover · ENTER escolher · 1-5 atalho · ESC voltar");
+    render_menu("CAPTURA E AUDIO", AUDIO_ITEMS, COUNT(AUDIO_ITEMS), s_sel_audio);
+    render_footer("Setas mover - ENTER escolhe - 1-6 atalho - ESC voltar");
 }
 
 static void render_status(void) {
@@ -602,29 +653,31 @@ static void render_status(void) {
     char up[12];
     format_uptime((uint32_t)(hal_time_us() / 1000000), up, sizeof(up));
     line(ST_TITLE, " STATUS DO SISTEMA" ST_SOFT "   (atualiza sozinho)");
-    line(ST_TEXT, " Ligado há:          %s", up);
+    line(ST_TEXT, " Ligado ha:          %s", up);
     line(ST_TEXT, " IP:                 %s", ip);
-    line(ST_TEXT, " Sessão:             %s%s", s.active ? "ATIVA" : "parada",
+    line(ST_TEXT, " Sessao:             %s%s", s.active ? "ATIVA" : "parada",
          s.active && s.local ? " (captura local)" : "");
-    line(ST_TEXT, " Metrônomo:          som %s · luz %s",
+    line(ST_TEXT, " Metronomo:          som %s - luz %s",
          (flags & CFG_FLAG_METRO_SOUND) ? "ligado" : "desligado",
          (flags & CFG_FLAG_METRO_VISUAL) ? "ligada" : "desligada");
-    line(ST_TEXT, " Envio de altura:    %s · áudio bruto %s",
+    line(ST_TEXT, " Envio de altura:    %s - audio bruto %s",
          (flags & CFG_FLAG_STREAM_PITCH) ? "ligado" : "desligado",
          (flags & CFG_FLAG_STREAM_AUDIO) ? "ligado" : "desligado");
     line(ST_TEXT, " Notas detectadas:   %" PRIu32, app_state_notes_detected());
     line(ST_TEXT, " Pacotes enviados:   %" PRIu32 " (erros: %" PRIu32 ")",
          link_service_packets_sent(), link_service_send_errors());
-    line(ST_TEXT, " Eventos perdidos:   %" PRIu32 " (altura/áudio descartados: %" PRIu32 ")",
+    line(ST_TEXT, " Eventos perdidos:   %" PRIu32 " (altura/audio descartados: %" PRIu32 ")",
          app_state_dropped_events(), app_state_dropped_stream());
     line(ST_TEXT, " Frames no buffer:   %d de %d (descartados: %" PRIu32 ")",
          circ_buffer_count(app_state_audio_buffer()), CIRC_BUFFER_CAPACITY,
          app_state_audio_buffer()->overruns);
-    line(ST_TEXT, " Nível de entrada:   %.1f dBFS (piso de ruído %.1f dBFS)",
+    line(ST_TEXT, " Nivel de entrada:   %.1f dBFS (piso de ruido %.1f dBFS)",
          audio_pipeline_level_db(), app_state_noise_floor());
     line(ST_TEXT, " Processamento:      %" PRIu32 " us por janela de %d ms",
          audio_pipeline_process_time_us(), HOP_SAMPLES * 1000 / SAMPLE_RATE);
-    line(ST_TEXT, " Memória livre:      %" PRIu32 " bytes", hal_system_free_heap());
+    line(ST_TEXT, " Relogio do audio:   %" PRIu32 " correcoes (amostras perdidas)",
+         audio_pipeline_clock_resyncs());
+    line(ST_TEXT, " Memoria livre:      %" PRIu32 " bytes", hal_system_free_heap());
     rule();
     render_problems(2);
     render_footer("ESC volta ao menu");
@@ -638,32 +691,36 @@ static void render_wifi_detail(void) {
     diagnostics_wifi_error_text(&d, err, sizeof(err));
     uint8_t mac[6];
     hal_wifi_mac(mac);
-    static const char *states[] = {"conectando", "CONECTADO", "rede própria (modo AP)"};
-    line(ST_TITLE, " DETALHES DA CONEXÃO WI-FI" ST_SOFT "   (atualiza sozinho)");
-    line(ST_TEXT, " Rede configurada:   %s", d.ssid[0] ? d.ssid : "(nenhuma)");
-    line(ST_TEXT, " Situação:           %s%s", states[d.state],
-         d.scanning ? " · procurando redes" : "");
+    static const char *states[] = {"conectando", "CONECTADO", "rede propria (modo AP)"};
+    line(ST_TITLE, " DETALHES DA CONEXAO WI-FI" ST_SOFT "   (atualiza sozinho)");
+    line(ST_TEXT, " Rede em uso:        %s%s", d.ssid[0] ? d.ssid : "(nenhuma)",
+         d.on_fallback ? " (rede padrao)" : "");
+    if (d.on_fallback) {
+        line(ST_ERROR, " Rede escolhida:     %s (nao conectou)", d.primary_ssid);
+    }
+    line(ST_TEXT, " Situacao:           %s%s", states[d.state],
+         d.scanning ? " - procurando redes" : "");
     line(ST_TEXT, " IP:                 %s", ip);
     if (d.state == HAL_WIFI_CONNECTED) {
         line(ST_TEXT, " Sinal:              %d dBm", hal_wifi_rssi());
     } else if (d.ssid_seen) {
-        line(ST_TEXT, " Na última busca:    %d dBm · canal %u · %s", d.ssid_rssi, d.ssid_channel,
+        line(ST_TEXT, " Na ultima busca:    %d dBm - canal %u - %s", d.ssid_rssi, d.ssid_channel,
              diagnostics_auth_name(d.ssid_auth));
     } else if (d.ssid[0]) {
-        line(ST_ERROR, " Na última busca:    rede NÃO encontrada");
+        line(ST_ERROR, " Na ultima busca:    rede NAO encontrada");
     }
     if (d.error != HAL_WIFI_ERR_NONE) {
-        line(ST_ERROR, " Última falha:       %s (código %u)", err, d.reason);
+        line(ST_ERROR, " Ultima falha:       %s (codigo %u)", err, d.reason);
     }
     if (d.state != HAL_WIFI_CONNECTED && d.error != HAL_WIFI_ERR_NOT_CONFIGURED) {
         line(ST_TEXT, " Tentativa:          %u de %u%s", d.attempt, d.max_attempts,
              d.state == HAL_WIFI_AP_ONLY ? " (depois, a cada 15 s)" : "");
     }
     if (d.state == HAL_WIFI_AP_ONLY) {
-        line(ST_TEXT, " Rede própria:       \"%s\" · senha %s · %u aparelho(s)",
+        line(ST_TEXT, " Rede propria:       \"%s\" - senha %s - %u aparelho(s)",
              hal_wifi_device_name(), WIFI_AP_PASS, d.ap_clients);
     }
-    line(ST_TEXT, " MAC do dispositivo: %02X:%02X:%02X:%02X:%02X:%02X · país %s", mac[0], mac[1],
+    line(ST_TEXT, " MAC do dispositivo: %02X:%02X:%02X:%02X:%02X:%02X - pais %s", mac[0], mac[1],
          mac[2], mac[3], mac[4], mac[5], WIFI_COUNTRY_CODE);
     rule();
     render_problems(1);
@@ -683,23 +740,23 @@ static void render_wifi_list(void) {
         char text[96];
         if (i < s_net_count) {
             const DrvWifiAp *n = &s_nets[i];
-            const char *sig = n->rssi >= -60 ? "ótimo" : n->rssi >= -70 ? "bom"
+            const char *sig = n->rssi >= -60 ? "otimo" : n->rssi >= -70 ? "bom"
                             : n->rssi >= -80 ? "fraco" : "muito fraco";
             snprintf(text, sizeof(text), "%-24.24s %4d dBm %-11s %-9s%s", n->ssid, n->rssi, sig,
                      diagnostics_auth_name(n->auth),
-                     strcmp(n->ssid, d.ssid) == 0 ? " ← atual" : "");
+                     strcmp(n->ssid, d.ssid) == 0 ? " <- atual" : "");
         } else {
             snprintf(text, sizeof(text), "Outra rede: digitar o nome");
         }
         if (i == s_list_sel) {
-            line_padded(ST_SELECTED, "  ▸ %2d  %s", i + 1, text);
+            line_padded(ST_SELECTED, "  > %2d  %s", i + 1, text);
         } else {
             line(ST_TEXT, "    " ST_KEY "%2d" ST_TEXT "  %s", i + 1, text);
         }
     }
-    if (total > window) line(ST_SOFT, "    (%d redes – use ↑/↓ para ver todas)", s_net_count);
+    if (total > window) line(ST_SOFT, "    (%d redes - use as setas para ver todas)", s_net_count);
     blank();
-    render_footer("↑/↓ mover · ENTER escolher · ESC voltar");
+    render_footer("Setas mover - ENTER escolhe - ESC voltar");
 }
 
 static void render_input(void) {
@@ -709,13 +766,13 @@ static void render_input(void) {
              s_pending_auth_known ? " (" : "",
              s_pending_auth_known ? diagnostics_auth_name(s_pending_auth) : "",
              s_pending_auth_known ? ")" : "");
-        line(ST_SOFT, " Maiúsculas e minúsculas contam. TAB mostra/oculta a senha.");
+        line(ST_SOFT, " Maiusculas e minusculas contam. TAB mostra/oculta a senha.");
         if (!s_pending_auth_known) line(ST_SOFT, " Rede aberta (sem senha)? Deixe vazio e tecle ENTER.");
     } else {
         line(ST_TITLE, " NOME DA REDE (SSID)");
         line(ST_SOFT, " Digite exatamente como aparece no celular (2,4 GHz).");
     }
-    line(ST_SOFT, " ENTER confirma · ESC cancela · %d s sem tecla cancela",
+    line(ST_SOFT, " ENTER confirma - ESC cancela - %d s sem tecla cancela",
          SERIAL_UI_IDLE_RESET_MS / 1000);
     blank();
     if (s_in.error[0]) line(ST_ERROR, " %s", s_in.error);
@@ -742,7 +799,7 @@ static void render_tuner(void) {
     static const char *names[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     float hz = audio_pipeline_last_pitch_hz();
     float level = audio_pipeline_level_db();
-    line(ST_TITLE, " AFINADOR E NÍVEL DO MICROFONE" ST_SOFT "   (ao vivo)");
+    line(ST_TITLE, " AFINADOR E NIVEL DO MICROFONE" ST_SOFT "   (ao vivo)");
     blank();
     if (hz > 0) {
         float midi_f = dsp_hz_to_midi(hz);
@@ -756,7 +813,7 @@ static void render_tuner(void) {
         if (pos > 20) pos = 20;
         for (int i = 0; i < 21; i++) bar[i] = i == 10 ? '|' : '-';
         bar[21] = '\0';
-        line(ST_TEXT, "   Afinação  [%.*s" ST_KEY "#" ST_TEXT "%s]", pos, bar, bar + pos + 1);
+        line(ST_TEXT, "   Afinacao  [%.*s" ST_KEY "#" ST_TEXT "%s]", pos, bar, bar + pos + 1);
     } else {
         line(ST_SOFT, "   Nota  ---  (toque uma nota no teclado)");
         blank();
@@ -768,8 +825,8 @@ static void render_tuner(void) {
     memset(meter, '#', (size_t)filled);
     memset(meter + filled, '.', (size_t)(40 - filled));
     meter[40] = '\0';
-    line(ST_TEXT, "   Nível     [%s] %.1f dBFS", meter, level);
-    line(ST_SOFT, "   Piso de ruído %.1f dBFS · microfone: %s", app_state_noise_floor(),
+    line(ST_TEXT, "   Nivel     [%s] %.1f dBFS", meter, level);
+    line(ST_SOFT, "   Piso de ruido %.1f dBFS - microfone: %s", app_state_noise_floor(),
          diagnostics_mic_text(audio_pipeline_mic_status()));
     blank();
     render_problems(1);
@@ -785,7 +842,7 @@ static void render_notes(void) {
     } else if (s.local) {
         line(ST_TEXT, " Captura local ativa: toque no teclado. ENTER para a captura.");
     } else {
-        line(ST_TEXT, " Execução do app em andamento: notas enviadas ao app.");
+        line(ST_TEXT, " Execucao do app em andamento: notas enviadas ao app.");
     }
     blank();
     NoteEvent notes[8];
@@ -794,22 +851,22 @@ static void render_notes(void) {
     for (int i = 0; i < n; i++) {
         const NoteEvent *e = &notes[i];
         if (e->type == NOTE_EVENT_ON) {
-            line(i == 0 ? ST_TITLE : ST_TEXT, "   ON   %-3s%d  %7.1f Hz  t=%6" PRIu32 " ms  confiança %.2f",
+            line(i == 0 ? ST_TITLE : ST_TEXT, "   ON   %-3s%d  %7.1f Hz  t=%6" PRIu32 " ms  confianca %.2f",
                  names[e->midi % 12], e->midi / 12 - 1, e->frequency_hz, e->time_ms, e->confidence);
         } else {
-            line(i == 0 ? ST_TITLE : ST_SOFT, "   OFF  %-3s%d  duração %" PRIu32 " ms",
+            line(i == 0 ? ST_TITLE : ST_SOFT, "   OFF  %-3s%d  duracao %" PRIu32 " ms",
                  names[e->midi % 12], e->midi / 12 - 1, e->duration_ms);
         }
     }
     blank();
     render_problems(1);
-    render_footer("ENTER inicia/para · ESC volta");
+    render_footer("ENTER inicia/para - ESC volta");
 }
 
 static void render_log(void) {
     static char lines[20][96];
     int n = hal_console_log_lines(lines, 20);
-    line(ST_TITLE, " LOG TÉCNICO" ST_SOFT "   (últimas %d linhas do ESP_LOG)", n);
+    line(ST_TITLE, " LOG TECNICO" ST_SOFT "   (ultimas %d linhas do ESP_LOG)", n);
     for (int i = 0; i < n; i++) {
         char c = lines[i][0];
         line(c == 'E' || c == 'W' ? ST_ERROR : ST_SOFT, " %.*s", WIDTH + 10, lines[i]);
@@ -820,9 +877,9 @@ static void render_log(void) {
 
 static void render_confirm_restart(void) {
     line(ST_TITLE, " REINICIAR O DISPOSITIVO?");
-    line(ST_TEXT, " O app será desconectado e a execução em andamento, encerrada.");
+    line(ST_TEXT, " O app sera desconectado e a execucao em andamento, encerrada.");
     blank();
-    line(ST_KEY, " ENTER = reiniciar · ESC = cancelar");
+    line(ST_KEY, " ENTER = reiniciar - ESC = cancelar");
 }
 
 static void render(void) {
@@ -840,22 +897,23 @@ static void render(void) {
         case SCR_NOTES:           render_notes(); break;
         case SCR_LOG:             render_log(); break;
         case SCR_CONFIRM_RESTART: render_confirm_restart(); break;
+        case SCR_EXECUTION:       return;           // Texto corrido (execution_tick)
     }
     flush();
 }
 
 // ======================= CAMPOS DE TEXTO =====================================
 
+/* Conecta à rede escolhida no menu; se ela falhar, volta para a rede padrão. */
 static void save_wifi(const char *ssid, const char *password) {
-    WifiCredentials cred;
+    WifiCredentials cred, fallback;
     memset(&cred, 0, sizeof(cred));
     strncpy(cred.ssid, ssid, HAL_SSID_MAX);
     strncpy(cred.password, password, HAL_PASS_MAX);
-    if (!hal_storage_save_wifi(&cred)) {
-        ui_event(UI_EV_WARN, "Não foi possível salvar a rede na memória (NVS)");
-    }
-    ui_event(UI_EV_INFO, "Rede \"%s\" salva. Conectando...", cred.ssid);
-    hal_wifi_reconnect(&cred);
+    hal_storage_default_wifi(&fallback);
+    ui_event(UI_EV_INFO, "Conectando a \"%s\" (reserva: rede padrao)...", cred.ssid);
+    hal_wifi_reconnect(&cred, &fallback);
+    memset(&cred, 0, sizeof(cred));
     memset(&s_in, 0, sizeof(s_in));                     // Não deixa a senha na RAM do menu
     go(SCR_WIFI_DETAIL);
 }
@@ -874,12 +932,12 @@ static void input_confirm(void) {
     }
     if (hal_wifi_check_password(s_in.text) != HAL_WIFI_ERR_NONE) {
         snprintf(s_in.error, sizeof(s_in.error),
-                 "Senha inválida: precisa ter de 8 a 63 caracteres (digitados: %d).",
+                 "Senha invalida: precisa ter de 8 a 63 caracteres (digitados: %d).",
                  visible_len(s_in.text, s_in.len));
         return;
     }
     if (s_in.len == 0 && s_pending_auth_known && s_pending_auth != DRV_WIFI_AUTH_OPEN) {
-        snprintf(s_in.error, sizeof(s_in.error), "Esta rede é protegida: digite a senha.");
+        snprintf(s_in.error, sizeof(s_in.error), "Esta rede tem senha: digite a senha.");
         return;
     }
     char password[HAL_PASS_MAX + 1];
@@ -997,6 +1055,11 @@ static void handle_key(Key k) {
         case SCR_LOG:
             if (k.kind != K_UP && k.kind != K_DOWN) go(SCR_MAIN);
             break;
+        case SCR_EXECUTION:
+            if (k.kind == K_ENTER || k.kind == K_ESC || k.kind == K_LEFT || k.kind == K_BKSP) {
+                go(SCR_MAIN);
+            }
+            break;
         case SCR_CONFIRM_RESTART:
             if (k.kind == K_ENTER) {
                 buf_reset();
@@ -1046,13 +1109,22 @@ static void ui_task(void *pvParameters) {
             s_last_key_us = now;
             handle_key(k);
             dirty = true;
-        } else if (s_interacted &&
+        } else if (s_interacted && s_screen != SCR_EXECUTION &&
                    now - s_last_key_us >= (int64_t)SERIAL_UI_IDLE_RESET_MS * 1000) {
             reset_menu();                       // 20 s sem tecla após uma interação
             dirty = true;
         }
 
-        if (dirty || now - last_render >= (int64_t)refresh_period_ms() * 1000) {
+        // Execução iniciada pelo app: o terminal passa a mostrar o monitor
+        // (exceto enquanto o usuário digita um nome de rede ou senha)
+        if (execution_monitor_take_started() && s_screen != SCR_INPUT) {
+            s_interacted = false;
+            enter_execution();
+        }
+        execution_tick();
+
+        if (s_screen != SCR_EXECUTION &&
+            (dirty || now - last_render >= (int64_t)refresh_period_ms() * 1000)) {
             render();
             last_render = now;
         }
@@ -1061,16 +1133,16 @@ static void ui_task(void *pvParameters) {
 
 void serial_ui_splash(void) {
     buf_reset();
-    line_padded(ST_BANNER, "  PARTITURA IoT  ·  firmware %s", FIRMWARE_VERSION);
+    line_padded(ST_BANNER, "  PARTITURA IoT  -  firmware %s", FIRMWARE_VERSION);
     blank();
-    line(ST_TEXT, "  Iniciando: microfone, Wi-Fi e comunicação com o app...");
+    line(ST_TEXT, "  Iniciando: microfone, Wi-Fi e comunicacao com o app...");
     s_full_redraw = true;
     flush();
 }
 
 void serial_ui_fatal(const char *what, const char *action) {
     buf_reset();
-    line_padded(ST_BANNER, "  PARTITURA IoT  ·  FALHA NA INICIALIZAÇÃO");
+    line_padded(ST_BANNER, "  PARTITURA IoT  -  FALHA NA INICIALIZACAO");
     blank();
     wrapped(ST_ERROR, "  ! ", what);
     blank();

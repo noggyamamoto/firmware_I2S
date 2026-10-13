@@ -35,7 +35,11 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static HalTimer s_retry_timer = NULL;               // Backoff entre tentativas / modo AP
 static HalTimer s_dhcp_timer = NULL;                // Associado, mas sem IP
-static WifiCredentials s_cred;
+static WifiCredentials s_cred;                      // Rede em uso agora
+static WifiCredentials s_primary;                   // Rede escolhida pelo usuário
+static WifiCredentials s_fallback;                  // Rede padrão (reserva)
+static bool s_has_fallback = false;
+static volatile bool s_on_fallback = false;         // Usando a rede padrão
 static hal_wifi_state_cb s_on_state = NULL;
 static volatile bool s_connected = false;
 static volatile bool s_ap_active = false;
@@ -62,8 +66,27 @@ static void notify(void) {
     if (s_on_state) s_on_state(hal_wifi_state());
 }
 
+/* Há uma rede para tentar. (Antes a rede padrão do config.h era tratada como
+ * "não configurada" e o dispositivo nunca se conectava a ela.) */
 static bool configured(void) {
-    return s_cred.ssid[0] != '\0' && strcmp(s_cred.ssid, WIFI_DEFAULT_SSID) != 0;
+    return s_cred.ssid[0] != '\0';
+}
+
+static void begin_connect(void);
+static void update_scan_info(void);
+
+/* A rede escolhida falhou: passa para a rede padrão, se houver uma diferente. */
+static bool switch_to_fallback(void) {
+    if (!s_has_fallback || s_on_fallback) return false;
+    LOCK();
+    s_cred = s_fallback;
+    s_on_fallback = true;
+    UNLOCK();
+    update_scan_info();
+    ESP_LOGW(TAG, "Rede \"%s\" falhou: usando a rede padrao \"%s\"", s_primary.ssid,
+             s_fallback.ssid);
+    begin_connect();
+    return true;
 }
 
 /* Compara ignorando maiúsculas/minúsculas e espaços nas pontas. */
@@ -165,7 +188,7 @@ static void start_ap_fallback(void) {
     if (s_ap_active) return;
     drv_wifi_enable_ap(s_device_name, WIFI_AP_PASS, WIFI_AP_CHANNEL);
     s_ap_active = true;
-    ESP_LOGW(TAG, "Rede \"%s\" indisponível. Rede própria ativa: \"%s\" (senha: %s, IP 192.168.4.1)",
+    ESP_LOGW(TAG, "Rede \"%s\" indisponivel. Rede propria ativa: \"%s\" (senha: %s, IP 192.168.4.1)",
              s_cred.ssid, s_device_name, WIFI_AP_PASS);
     if (configured()) hal_timer_start_periodic(s_retry_timer, AP_RETRY_PERIOD_US);
 }
@@ -182,7 +205,7 @@ static void retry_timer_cb(void *arg) {
 static void dhcp_timer_cb(void *arg) {
     (void)arg;
     if (s_connected || s_stopping) return;
-    ESP_LOGW(TAG, "Associado a \"%s\", mas sem IP após %d s (DHCP)", s_cred.ssid,
+    ESP_LOGW(TAG, "Associado a \"%s\", mas sem IP apos %d s (DHCP)", s_cred.ssid,
              WIFI_DHCP_TIMEOUT_MS / 1000);
     s_dhcp_failed = true;
     drv_wifi_disconnect();                          // Gera STA_DISCONNECTED -> nova tentativa
@@ -213,7 +236,7 @@ static void handle_disconnect(uint16_t reason) {
     int attempt = s_retries;
     UNLOCK();
 
-    ESP_LOGW(TAG, "Falha na conexão com \"%s\" (motivo %u, causa %d), tentativa %d de %d",
+    ESP_LOGW(TAG, "Falha na conexao com \"%s\" (motivo %u, causa %d), tentativa %d de %d",
              s_cred.ssid, reason, err, attempt, max_attempts(err));
 
     if (s_ap_active) {                              // Modo AP: o timer periódico cuida
@@ -224,8 +247,8 @@ static void handle_disconnect(uint16_t reason) {
         int64_t delay_ms = attempt * 1000LL;        // Backoff: 1 s, 2 s, ... até 5 s
         if (delay_ms > 5000) delay_ms = 5000;
         hal_timer_start_once(s_retry_timer, (uint64_t)delay_ms * 1000);
-    } else {
-        start_ap_fallback();
+    } else if (!switch_to_fallback()) {             // Rede escolhida -> rede padrão
+        start_ap_fallback();                        // -> rede própria (modo AP)
     }
     notify();
 }
@@ -267,14 +290,14 @@ static void on_event(DrvWifiEvent event, uint32_t arg) {
             LOCK();
             s_ap_clients++;
             UNLOCK();
-            ESP_LOGI(TAG, "Um dispositivo entrou na rede própria");
+            ESP_LOGI(TAG, "Um dispositivo entrou na rede propria");
             break;
 
         case DRV_WIFI_EVENT_AP_CLIENT_LEFT:
             LOCK();
             if (s_ap_clients > 0) s_ap_clients--;
             UNLOCK();
-            ESP_LOGI(TAG, "Um dispositivo saiu da rede própria");
+            ESP_LOGI(TAG, "Um dispositivo saiu da rede propria");
             break;
     }
 }
@@ -313,7 +336,8 @@ static void begin_connect(void) {
     s_retries = 0;
     UNLOCK();
     if (err != HAL_WIFI_ERR_NONE) {
-        ESP_LOGW(TAG, "Wi-Fi não iniciado (causa %d): use o menu serial, opção Rede Wi-Fi", err);
+        ESP_LOGW(TAG, "Wi-Fi nao iniciado (causa %d): use o menu serial, opcao Rede Wi-Fi", err);
+        if (switch_to_fallback()) return;
         start_ap_fallback();
         notify();
         return;
@@ -323,8 +347,25 @@ static void begin_connect(void) {
     drv_wifi_connect();
 }
 
-bool hal_wifi_start(const WifiCredentials *cred, hal_wifi_state_cb on_state) {
-    s_cred = *cred;
+/* Define a rede escolhida e a reserva (ignorada se for a mesma rede). */
+static void set_networks(const WifiCredentials *primary, const WifiCredentials *fallback) {
+    LOCK();
+    s_primary = *primary;
+    s_has_fallback = fallback != NULL && fallback->ssid[0] != '\0' &&
+                     strcmp(fallback->ssid, primary->ssid) != 0;
+    if (s_has_fallback) s_fallback = *fallback;
+    s_on_fallback = false;
+    s_cred = *primary;
+    if (primary->ssid[0] == '\0' && s_has_fallback) {      // Nenhuma rede escolhida
+        s_cred = *fallback;
+        s_on_fallback = true;
+    }
+    UNLOCK();
+}
+
+bool hal_wifi_start(const WifiCredentials *primary, const WifiCredentials *fallback,
+                    hal_wifi_state_cb on_state) {
+    set_networks(primary, fallback);
     s_on_state = on_state;
     if (!drv_wifi_init(on_event)) return false;
 
@@ -342,17 +383,17 @@ bool hal_wifi_start(const WifiCredentials *cred, hal_wifi_state_cb on_state) {
     // RFE01: varre as redes antes de conectar (o resultado ajuda no diagnóstico)
     int found = scan_and_store();
     ESP_LOGI(TAG, "%d redes encontradas; \"%s\" %s", found, s_cred.ssid,
-             s_seen ? "visível" : "não encontrada");
+             s_seen ? "visivel" : "nao encontrada");
 
     begin_connect();
     return true;
 }
 
-void hal_wifi_reconnect(const WifiCredentials *cred) {
+void hal_wifi_reconnect(const WifiCredentials *primary, const WifiCredentials *fallback) {
     hal_timer_stop(s_retry_timer);
     hal_timer_stop(s_dhcp_timer);
+    set_networks(primary, fallback);
     LOCK();
-    s_cred = *cred;
     s_dhcp_failed = false;
     UNLOCK();
     update_scan_info();
@@ -365,6 +406,16 @@ void hal_wifi_reconnect(const WifiCredentials *cred) {
         UNLOCK();
     }
     begin_connect();
+}
+
+void hal_wifi_retry(void) {
+    WifiCredentials primary, fallback;
+    LOCK();
+    primary = s_primary;
+    fallback = s_fallback;
+    bool has_fallback = s_has_fallback;
+    UNLOCK();
+    hal_wifi_reconnect(&primary, has_fallback ? &fallback : NULL);
 }
 
 int hal_wifi_scan(DrvWifiAp *out, int max) {
@@ -415,6 +466,8 @@ void hal_wifi_get_diag(HalWifiDiag *out) {
     out->ssid_auth = s_seen_auth;
     memcpy(out->similar_ssid, s_similar, sizeof(out->similar_ssid));
     out->ap_clients = (uint8_t)s_ap_clients;
+    out->on_fallback = s_on_fallback && s_primary.ssid[0] != '\0';
+    memcpy(out->primary_ssid, s_primary.ssid, sizeof(out->primary_ssid));
     UNLOCK();
     if (!configured()) out->ssid[0] = '\0';
 }

@@ -5,3 +5,9 @@ CONFIG_HTTPD_WS_SUPPORT=y
 
 # Menor latência na tarefa de timers (metrônomo e indicadores)
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=4096
+
+# Desempenho: o YIN roda a cada 16 ms no núcleo 1. Com -Og e 160 MHz o
+# processamento chegava perto do tempo da janela, a tarefa ociosa do núcleo 1
+# deixava de rodar (task_wdt) e o DMA do I2S perdia amostras.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y

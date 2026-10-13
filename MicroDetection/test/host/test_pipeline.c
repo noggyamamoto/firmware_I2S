@@ -19,7 +19,7 @@
 
 #define FS       16000
 #define HOP      256
-#define WINDOW   1024
+#define WINDOW   512
 
 typedef struct { int midi; double start; double dur; } Expected;
 
@@ -60,22 +60,23 @@ static void render_click(float *buf, size_t len, double start) {
     }
 }
 
-static int run_case(const char *name, const Expected *exp_notes, int n_exp, double total_s,
-                    double noise_db, double amp, const double *clicks, int n_clicks, int check_dur) {
+static int run_case_ex(const char *name, const Expected *played, int n_played,
+                       const Expected *exp_notes, int n_exp, double total_s, double noise_db,
+                       double amp, const double *clicks, int n_clicks, int check_dur) {
     printf("Caso: %s\n", name);
     size_t len = (size_t)(total_s * FS);
     float *sig = calloc(len, sizeof(float));
-    for (int i = 0; i < n_exp; i++)
-        render_note(sig, len, exp_notes[i].midi, exp_notes[i].start, exp_notes[i].dur, amp);
+    for (int i = 0; i < n_played; i++)
+        render_note(sig, len, played[i].midi, played[i].start, played[i].dur, amp);
     for (int i = 0; i < n_clicks; i++) render_click(sig, len, clicks[i]);
     double noise_amp = pow(10.0, noise_db / 20.0);
     for (size_t i = 0; i < len; i++) sig[i] += (float)(noise_amp * noise());
 
     BandpassFilter filt;
-    bandpass_init(&filt, FS, 70.0f, 2500.0f);
+    bandpass_init(&filt, FS, 200.0f, 2500.0f);
     static float diff[WINDOW / 2 + 1];
     YinDetector yin;
-    yin_init(&yin, FS, WINDOW, 65.0f, 2100.0f, 0.15f, diff);
+    yin_init(&yin, FS, WINDOW, 254.0f, 2100.0f, 0.15f, diff);
     NoteTrackerConfig cfg;
     note_tracker_default_config(&cfg);
     NoteTracker tr;
@@ -93,7 +94,8 @@ static int run_case(const char *name, const Expected *exp_notes, int n_exp, doub
         memcpy(window + WINDOW - HOP, hop, sizeof(hop));
         uint32_t t_ms = (uint32_t)(pos * 1000 / FS);
         while (ci < n_clicks && clicks[ci] * 1000 <= t_ms + 16) {
-            note_tracker_mask_until(&tr, (uint32_t)(clicks[ci] * 1000) + 45, 1760.0f);
+            uint32_t c = (uint32_t)(clicks[ci] * 1000);
+            note_tracker_mask(&tr, c > 16 ? c - 16 : 0, c + 45, 1760.0f);
             ci++;
         }
         float conf = 0;
@@ -140,13 +142,19 @@ static int run_case(const char *name, const Expected *exp_notes, int n_exp, doub
     return 0;
 }
 
+static int run_case(const char *name, const Expected *exp_notes, int n_exp, double total_s,
+                    double noise_db, double amp, const double *clicks, int n_clicks, int check_dur) {
+    return run_case_ex(name, exp_notes, n_exp, exp_notes, n_exp, total_s, noise_db, amp, clicks,
+                       n_clicks, check_dur);
+}
+
 int main(void) {
     srand(42);
 
-    // Melodia simples com nota repetida (Mi-Mi) e saltos
+    // Melodia simples com nota repetida (Mi-Mi) e saltos, a partir do C4
     const Expected melody[] = {
         {60, 0.30, 0.45}, {62, 0.90, 0.45}, {64, 1.50, 0.40}, {64, 1.95, 0.40},
-        {67, 2.50, 0.90}, {72, 3.60, 0.30}, {57, 4.10, 0.60}, {48, 5.00, 0.80},
+        {67, 2.50, 0.90}, {72, 3.60, 0.30}, {77, 4.10, 0.60}, {83, 5.00, 0.80},
     };
     run_case("melodia em sala silenciosa", melody, 8, 6.2, -80.0, 0.05, NULL, 0, 1);
 
@@ -167,8 +175,31 @@ int main(void) {
     run_case("volume baixo com ruido forte", melody, 8, 6.2, -50.0, 0.012, NULL, 0, 0);
 
     // Nota grave e aguda nos extremos da faixa
-    const Expected extremes[] = {{41, 0.3, 0.8}, {96, 1.4, 0.5}};
-    run_case("extremos da faixa (F2 e C7)", extremes, 2, 2.3, -80.0, 0.05, NULL, 0, 1);
+    const Expected extremes[] = {{60, 0.3, 0.8}, {96, 1.4, 0.5}};
+    run_case("extremos da faixa (C4 e C7)", extremes, 2, 2.3, -80.0, 0.05, NULL, 0, 1);
+
+    // Notas rapidas: fusas a 100 BPM (75 ms) na regiao de B6
+    const Expected fusas[] = {
+        {91, 0.30, 0.075}, {93, 0.375, 0.075}, {95, 0.45, 0.075}, {93, 0.525, 0.075},
+        {91, 0.60, 0.30},
+    };
+    run_case("fusas a 100 BPM (G6-B6)", fusas, 5, 1.3, -80.0, 0.05, NULL, 0, 0);
+
+    // Nota longa com cliques de metronomo por cima: os cliques nao podem
+    // virar um "reataque" (nota repetida falsa)
+    const Expected sustained[] = {{64, 0.20, 1.60}};
+    const double clicks_over[] = {0.6, 1.0, 1.4};
+    run_case("nota longa com cliques por cima", sustained, 1, 2.2, -80.0, 0.05, clicks_over, 3, 0);
+
+    // Mesma nota repetida rapidamente (tecla solta por ~40 ms entre os ataques)
+    const Expected repeated[] = {{67, 0.30, 0.36}, {67, 0.70, 0.36}, {67, 1.10, 0.50}};
+    run_case("nota repetida rapidamente", repeated, 3, 2.0, -80.0, 0.05, NULL, 0, 0);
+
+    // Notas abaixo do C4 (A3 e F3) nao geram nota; a seguinte (C4) sim
+    const Expected low_played[] = {{57, 0.3, 0.5}, {53, 1.0, 0.5}, {60, 1.7, 0.5}};
+    const Expected low_expected[] = {{60, 1.7, 0.5}};
+    run_case_ex("notas abaixo do C4 sao ignoradas", low_played, 3, low_expected, 1, 2.5, -80.0,
+                0.05, NULL, 0, 1);
 
     if (failures == 0) {
         printf("\nTODOS OS TESTES PASSARAM\n");

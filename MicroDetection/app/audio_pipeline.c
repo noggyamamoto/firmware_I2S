@@ -14,6 +14,7 @@
 
 #include "app_state.h"
 #include "config.h"
+#include "execution_monitor.h"
 #include "hal_audio.h"
 #include "hal_time.h"
 #include "dsp.h"
@@ -22,7 +23,7 @@
 
 static const char *TAG = "audio";
 
-static BandpassFilter  s_filter;                    // Passa-banda 70 Hz – 2,5 kHz
+static BandpassFilter  s_filter;                    // Passa-banda 200 Hz – 2,5 kHz
 static YinDetector     s_yin;                       // Detector de altura
 static NoteTracker     s_tracker;                   // Segmentação de notas
 static float           s_window[WINDOW_SAMPLES];    // Janela deslizante de análise
@@ -30,6 +31,7 @@ static float           s_yin_diff[WINDOW_SAMPLES / 2 + 1];
 static float           s_hop[HOP_SAMPLES];          // Trecho mais recente
 
 static portMUX_TYPE    s_mask_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t        s_mask_from_ms = 0;
 static uint32_t        s_mask_until_ms = 0;
 static float           s_mask_hz = 0.0f;
 static bool            s_mask_pending = false;
@@ -74,6 +76,8 @@ bool audio_pipeline_init(void) {
     cfg.onset_timeout_hops = ONSET_TIMEOUT_HOPS;
     cfg.release_hops = RELEASE_HOPS;
     cfg.quantize_ms = QUANTIZE_MS;
+    cfg.min_midi = MIN_MIDI_NOTE;
+    cfg.max_midi = MAX_MIDI_NOTE;
     note_tracker_init(&s_tracker, &cfg);
 
     memset(s_window, 0, sizeof(s_window));
@@ -83,15 +87,20 @@ bool audio_pipeline_init(void) {
     return true;
 }
 
-void audio_pipeline_mask_click(uint32_t until_ms, float click_hz) {
+void audio_pipeline_mask_click(uint32_t click_ms, float click_hz) {
+    // A janela de análise (32 ms) termina no fim do trecho (16 ms): o clique
+    // aparece nos trechos que começam até 16 ms antes dele
+    const uint32_t hop_ms = HOP_SAMPLES * 1000 / SAMPLE_RATE;
     portENTER_CRITICAL(&s_mask_lock);
-    s_mask_until_ms = until_ms;
+    s_mask_from_ms = click_ms > hop_ms ? click_ms - hop_ms : 0;
+    s_mask_until_ms = click_ms + CLICK_MASK_MS;
     s_mask_hz = click_hz;
     s_mask_pending = true;
     portEXIT_CRITICAL(&s_mask_lock);
 }
 
 uint32_t audio_pipeline_process_time_us(void) { return s_process_us; }
+uint32_t audio_pipeline_clock_resyncs(void) { return hal_audio_resync_count(); }
 float audio_pipeline_level_db(void) { return s_level_db; }
 float audio_pipeline_last_pitch_hz(void) { return s_last_pitch; }
 MicStatus audio_pipeline_mic_status(void) { return s_mic_status; }
@@ -139,7 +148,10 @@ static void publish_note(const NoteEvent *ev, bool local) {
         .timestamp_ms = ev->time_ms,
     };
     out.u.note = *ev;
-    if (!local) app_state_post(&out);
+    if (!local) {
+        app_state_post(&out);
+        execution_monitor_captured(ev);         // Monitor serial (só registra)
+    }
 
     portENTER_CRITICAL(&s_recent_lock);
     s_recent[s_recent_next] = *ev;
@@ -166,20 +178,21 @@ static void audio_task(void *arg) {
     bool was_active = false;
     int hop_counter = 0;
     int read_fails = 0;
+    int yield_counter = 0;
     size_t frame_fill = 0;
     AudioFrame *frame = NULL;                       // Slot do buffer circular em preenchimento
 
     if (!hal_audio_start()) s_mic_status = MIC_STATUS_READ_ERROR;
 
     while (1) {
-        // Instante da primeira amostra do trecho que será lido
-        int64_t hop_start_us = hal_audio_next_sample_time_us();
         if (hal_audio_read(s_hop, HOP_SAMPLES, 200) != HOP_SAMPLES) {
             if (++read_fails >= MIC_READ_FAILS) s_mic_status = MIC_STATUS_READ_ERROR;
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
         read_fails = 0;
+        // Instante da primeira amostra do trecho lido (relógio do sistema)
+        int64_t hop_start_us = hal_audio_block_time_us();
         int64_t t_begin = hal_time_us();
         check_microphone(s_hop, HOP_SAMPLES);
 
@@ -218,11 +231,12 @@ static void audio_task(void *arg) {
         // Máscara do clique do metrônomo
         portENTER_CRITICAL(&s_mask_lock);
         bool mask = s_mask_pending;
+        uint32_t mask_from = s_mask_from_ms;
         uint32_t mask_until = s_mask_until_ms;
         float mask_hz = s_mask_hz;
         s_mask_pending = false;
         portEXIT_CRITICAL(&s_mask_lock);
-        if (mask) note_tracker_mask_until(&s_tracker, mask_until, mask_hz);
+        if (mask) note_tracker_mask(&s_tracker, mask_from, mask_until, mask_hz);
 
         // 5) Segmentação em notas (somente trechos após o início da sessão)
         NoteEvent events[2];
@@ -279,6 +293,15 @@ static void audio_task(void *arg) {
         // Tempo de processamento por janela (RNFE01: deve ficar bem abaixo de 16 ms)
         uint32_t spent = (uint32_t)(hal_time_us() - t_begin);
         s_process_us = (s_process_us * 7 + spent) / 8;
+
+        // Garantia para o watchdog: se o processamento ficar perto do tempo de
+        // uma janela, a leitura nunca bloqueia e a tarefa ociosa do núcleo 1
+        // não roda (task_wdt). Cede 1 tick no máximo a cada ~2 s; o DMA guarda
+        // ~96 ms de áudio, então nenhuma amostra é perdida.
+        if (++yield_counter >= 125) {
+            yield_counter = 0;
+            if (s_process_us > HOP_SAMPLES * 1000000u / SAMPLE_RATE * 3 / 4) vTaskDelay(1);
+        }
     }
 }
 

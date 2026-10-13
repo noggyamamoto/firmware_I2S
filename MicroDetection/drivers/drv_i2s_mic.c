@@ -66,7 +66,7 @@ bool drv_i2s_mic_init(const DrvI2sMicConfig *cfg, size_t max_samples_per_read) {
     s_capacity = max_samples_per_read;
     s_raw = malloc(max_samples_per_read * sizeof(int32_t));
     if (!s_raw) {
-        ESP_LOGE(TAG, "Sem memória para o buffer I2S");
+        ESP_LOGE(TAG, "Sem memoria para o buffer I2S");
         drv_i2s_mic_deinit();
         return false;
     }

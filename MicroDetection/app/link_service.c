@@ -13,6 +13,7 @@
 
 #include "app_state.h"
 #include "config.h"
+#include "execution_monitor.h"
 #include "hal_net.h"
 #include "hal_time.h"
 #include "hal_wifi.h"
@@ -213,8 +214,14 @@ static void handle_packet(const NetPeer *from, const uint8_t *buf, size_t size) 
         case PKT_SESSION_START: {
             if (!from_peer || len < (int)sizeof(PktSessionStart)) return;
             const PktSessionStart *p = (const PktSessionStart *)buf;
-            app_state_session_start(p->bpm, p->beats_per_bar, p->count_in_bars, p->flags, false,
-                                    p->session_id);
+            // Captação pronta desde o comando: o relógio da sessão começa na
+            // primeira batida da contagem, e o monitor serial já mostra a
+            // contagem e as notas esperadas/captadas
+            if (app_state_session_start(p->bpm, p->beats_per_bar, p->count_in_bars, p->flags, false,
+                                        p->session_id)) {
+                execution_monitor_session_start(p->bpm, p->beats_per_bar, p->beat_type,
+                                                p->count_in_bars);
+            }
             break;
         }
 
@@ -229,6 +236,14 @@ static void handle_packet(const NetPeer *from, const uint8_t *buf, size_t size) 
             break;
         }
 
+        case PKT_EXPECTED_NOTE: {
+            if (!from_peer || len < (int)sizeof(PktExpectedNote)) return;
+            const PktExpectedNote *p = (const PktExpectedNote *)buf;
+            execution_monitor_expected(p->index, p->midi, p->onset_ms, p->duration_ms,
+                                       p->beats_milli);
+            break;
+        }
+
         default:
             break;
     }
@@ -238,7 +253,7 @@ static void handle_packet(const NetPeer *from, const uint8_t *buf, size_t size) 
 static void watchdog_cb(void *arg) {
     (void)arg;
     if (app_state_is_paired() && app_state_ms_since_touch() > SESSION_TIMEOUT_MS) {
-        ESP_LOGW(TAG, "App sem resposta há %d ms, desconectando", SESSION_TIMEOUT_MS);
+        ESP_LOGW(TAG, "App sem resposta ha %d ms, desconectando", SESSION_TIMEOUT_MS);
         s_timeouts++;
         ui_event(UI_EV_WARN, "App parou de responder (%d s sem sinal): pareamento desfeito",
                  SESSION_TIMEOUT_MS / 1000);

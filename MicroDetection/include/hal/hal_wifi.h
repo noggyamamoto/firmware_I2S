@@ -3,8 +3,9 @@
  * hal/hal_wifi – conexão Wi-Fi (RFE01 / RU01)
  *
  *  1. Varre as redes disponíveis (o resultado fica guardado para diagnóstico)
- *  2. Conecta à rede configurada, com novas tentativas espaçadas (backoff)
- *  3. Se não conseguir, ativa uma rede própria (modo AP) "PartituraIoT-XXXX",
+ *  2. Conecta à rede escolhida pelo usuário, com novas tentativas espaçadas
+ *     (backoff); se ela não conectar, passa para a rede padrão (config.h)
+ *  3. Se nenhuma conectar, ativa uma rede própria (modo AP) "PartituraIoT-XXXX",
  *     permitindo que o celular/computador se conecte diretamente ao
  *     dispositivo, e continua tentando a rede configurada em segundo plano
  *     (sem atrapalhar quem estiver usando a rede própria)
@@ -61,15 +62,25 @@ typedef struct {
     DrvWifiAuth  ssid_auth;
     char         similar_ssid[33];      // Nome parecido encontrado (maiúsculas, espaços)
     uint8_t      ap_clients;            // Aparelhos na rede própria
+    bool         on_fallback;           // A rede escolhida falhou: usando a padrão
+    char         primary_ssid[33];      // Rede escolhida pelo usuário
 } HalWifiDiag;
 
 typedef void (*hal_wifi_state_cb)(HalWifiState state);
 
-/** @brief Inicializa o rádio e inicia a conexão. */
-bool hal_wifi_start(const WifiCredentials *cred, hal_wifi_state_cb on_state);
+/**
+ * @brief Inicializa o rádio e conecta à rede `primary`. Se ela não conectar
+ *        (tentativas esgotadas), usa `fallback` (rede padrão; NULL = nenhuma);
+ *        se nenhuma conectar, ativa a rede própria (modo AP).
+ */
+bool hal_wifi_start(const WifiCredentials *primary, const WifiCredentials *fallback,
+                    hal_wifi_state_cb on_state);
 
-/** @brief Troca as credenciais e reconecta. */
-void hal_wifi_reconnect(const WifiCredentials *cred);
+/** @brief Troca as redes (escolhida e reserva) e reconecta. */
+void hal_wifi_reconnect(const WifiCredentials *primary, const WifiCredentials *fallback);
+
+/** @brief Recomeça as tentativas pela rede escolhida. */
+void hal_wifi_retry(void);
 
 /**
  * @brief Varre as redes (bloqueante, ~2–3 s). Pausa as tentativas de conexão

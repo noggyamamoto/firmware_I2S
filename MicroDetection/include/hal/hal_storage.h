@@ -1,6 +1,10 @@
 /*
  * ============================================================================
- * hal/hal_storage – configurações persistentes (credenciais do Wi-Fi)
+ * hal/hal_storage – memória não volátil (NVS) e rede Wi-Fi padrão
+ *
+ * A NVS precisa estar iniciada para o rádio Wi-Fi funcionar. A rede usada
+ * é informada a cada inicialização (app/wifi_setup); a rede padrão do
+ * config.h é a reserva quando a informada não conecta.
  * ============================================================================
  */
 #ifndef HAL_STORAGE_H
@@ -19,10 +23,7 @@ typedef struct {
 /** @brief Inicializa o armazenamento não volátil. */
 bool hal_storage_init(void);
 
-/** @brief Carrega as credenciais salvas ou os valores padrão do config.h. */
-void hal_storage_load_wifi(WifiCredentials *out);
-
-/** @brief Salva novas credenciais. */
-bool hal_storage_save_wifi(const WifiCredentials *cred);
+/** @brief Rede padrão (WIFI_DEFAULT_SSID / WIFI_DEFAULT_PASS do config.h). */
+void hal_storage_default_wifi(WifiCredentials *out);
 
 #endif // HAL_STORAGE_H

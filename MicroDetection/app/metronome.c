@@ -13,6 +13,7 @@
 #include "app_state.h"
 #include "audio_pipeline.h"
 #include "config.h"
+#include "execution_monitor.h"
 #include "hal_indicators.h"
 #include "hal_time.h"
 #include "protocol.h"
@@ -91,7 +92,7 @@ static void beat_cb(void *arg) {
     if ((flags & CFG_FLAG_METRO_SOUND) || count_in) {
         float hz = accent ? CLICK_ACCENT_HZ : CLICK_BEAT_HZ;
         hal_buzzer_beep((uint32_t)hz, CLICK_MS);
-        audio_pipeline_mask_click(t_ms + CLICK_MASK_MS, hz);   // Não confundir o clique com nota
+        audio_pipeline_mask_click(t_ms, hz);                   // Não confundir o clique com nota
     }
     // Luz: sempre durante a contagem (aviso visual), depois conforme a opção
     if ((flags & CFG_FLAG_METRO_VISUAL) || count_in) {
@@ -102,6 +103,7 @@ static void beat_cb(void *arg) {
     }
 
     if (!test) {
+        execution_monitor_set_bpm(bpm);
         OutEvent ev = {.type = OUT_BEAT, .timestamp_ms = t_ms};
         ev.u.beat.beat_in_bar = beat_in_bar;
         ev.u.beat.count_in = count_in;
@@ -120,7 +122,7 @@ static void beat_cb(void *arg) {
 
 void metronome_init(void) {
     s_timer = hal_timer_create(beat_cb, NULL, "metronome");
-    if (!s_timer) ESP_LOGE(TAG, "Falha ao criar o temporizador do metrônomo");
+    if (!s_timer) ESP_LOGE(TAG, "Falha ao criar o temporizador do metronomo");
 }
 
 static void start_internal(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in_bars,
@@ -152,7 +154,7 @@ static void start_internal(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in
 void metronome_start(uint16_t bpm, uint8_t beats_per_bar, uint8_t count_in_bars,
                      uint8_t flags, int64_t t0_us, uint8_t session_id) {
     start_internal(bpm, beats_per_bar, count_in_bars, flags, t0_us, false, 0, session_id);
-    ESP_LOGI(TAG, "Metrônomo: %u BPM, %u/4, som=%d luz=%d", bpm, beats_per_bar,
+    ESP_LOGI(TAG, "Metronomo: %u BPM, %u/4, som=%d luz=%d", bpm, beats_per_bar,
              (flags & CFG_FLAG_METRO_SOUND) != 0, (flags & CFG_FLAG_METRO_VISUAL) != 0);
 }
 
@@ -163,7 +165,7 @@ void metronome_set_tempo(uint16_t bpm, uint16_t at_beat) {
     s_pending_at = at_beat;                 // Já passou (ou 0): vale na próxima batida
     uint32_t next = s_beat_index;
     portEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "Novo andamento: %u BPM a partir da batida %u (próxima: %lu)", bpm, at_beat,
+    ESP_LOGI(TAG, "Novo andamento: %u BPM a partir da batida %u (proxima: %lu)", bpm, at_beat,
              (unsigned long)next);
 }
 

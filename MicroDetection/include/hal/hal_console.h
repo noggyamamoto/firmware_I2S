@@ -6,6 +6,11 @@
  * hal_console_capture_logs(), as mensagens do ESP_LOG (firmware, Wi-Fi,
  * lwIP...) deixam de ser impressas e passam a ser guardadas em memória
  * (últimas CONSOLE_LOG_LINES linhas), consultáveis pelo menu de diagnóstico.
+ * O mesmo vale para as mensagens precoces (esp_rom_printf), como o aviso do
+ * watchdog de tarefas ("task_wdt") e o "Backtrace" que o acompanha.
+ *
+ * Tudo o que é escrito no terminal sai em ASCII puro: acentos, cedilha e
+ * símbolos especiais são trocados por equivalentes simples.
  * ============================================================================
  */
 #ifndef HAL_CONSOLE_H
@@ -17,7 +22,7 @@
 /** @brief Configura a UART do console (UART_PORT / UART_BAUDRATE do config.h). */
 bool hal_console_init(void);
 
-/** @brief Desvia o ESP_LOG do terminal para o histórico em memória. */
+/** @brief Desvia o ESP_LOG e o esp_rom_printf do terminal para o histórico em memória. */
 void hal_console_capture_logs(void);
 
 /** @brief printf enviado pelo console. */

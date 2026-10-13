@@ -53,7 +53,7 @@ bool drv_wifi_init(drv_wifi_event_cb callback) {
     // País: sem isto o rádio usa o modo "mundial" (canais 1–11 ativos), e um
     // modem configurado no canal 12 ou 13 não é encontrado.
     if (esp_wifi_set_country_code(WIFI_COUNTRY_CODE, true) != ESP_OK) {
-        ESP_LOGW(TAG, "País %s não aplicado", WIFI_COUNTRY_CODE);
+        ESP_LOGW(TAG, "Pais %s nao aplicado", WIFI_COUNTRY_CODE);
     }
 
     if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL) != ESP_OK ||

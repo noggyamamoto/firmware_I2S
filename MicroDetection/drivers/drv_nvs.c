@@ -14,7 +14,7 @@ static const char *TAG = "drv_nvs";
 bool drv_nvs_init(void) {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS inconsistente, apagando partição");
+        ESP_LOGW(TAG, "NVS inconsistente, apagando particao");
         if (nvs_flash_erase() != ESP_OK) return false;
         err = nvs_flash_init();
     }

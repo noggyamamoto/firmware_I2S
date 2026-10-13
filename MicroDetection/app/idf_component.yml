@@ -1,0 +1,7 @@
+## Componentes do ESP-IDF Component Manager usados pelo firmware
+## (baixados automaticamente na primeira compilação: PlatformIO ou idf.py).
+dependencies:
+  # Anúncio na rede local (partitura.local): o app web encontra o
+  # dispositivo sem broadcast. Opcional: sem ele o firmware compila e o app
+  # usa broadcast/IP (ver hal_net.c).
+  espressif/mdns: "^1.4.0"
