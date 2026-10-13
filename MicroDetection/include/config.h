@@ -96,9 +96,13 @@
 #define CLICK_MASK_MS           45                      // Ignora ataques durante o clique do buzzer
 
 // ======================= REDE ===============================================
-// Credenciais padrão (podem ser alteradas pelo menu serial e ficam salvas na NVS)
-#define WIFI_DEFAULT_SSID       "JOAO_2.4G"                  // Nome da rede Wi-Fi (substituir)
-#define WIFI_DEFAULT_PASS       "30226280!"                 // Senha da rede Wi-Fi
+// Rede padrão. Ao ligar, o terminal pede o nome e a senha da rede desejada
+// (app/wifi_setup); se nada for digitado ou se a rede digitada não conectar,
+// o dispositivo usa esta rede.
+#define WIFI_DEFAULT_SSID       "JOAO_2.4G"             // Nome da rede Wi-Fi padrão
+#define WIFI_DEFAULT_PASS       "30226280!"             // Senha da rede Wi-Fi padrão
+#define WIFI_SETUP_TIMEOUT_MS   15000                   // Sem tecla na pergunta da rede: usa a padrão
+#define WIFI_SETUP_IDLE_MS      60000                   // Digitação parada por 60 s: usa a padrão
 #define WIFI_MAX_RETRIES        8                       // Tentativas antes de ativar o modo AP
 #define WIFI_FATAL_RETRIES      3                       // Idem quando a causa não se resolve sozinha
                                                         // (senha incorreta, rede inexistente)
@@ -108,6 +112,7 @@
 #define WIFI_AP_CHANNEL         6                       // Canal da rede própria
 
 #define WS_PORT                 80                      // Servidor WebSocket do app web (ws://IP/ws)
+#define MDNS_HOSTNAME           "partitura"             // Nome na rede local: partitura.local
 
 #define SESSION_TIMEOUT_MS      5000                    // Sem PING por esse tempo = app perdido
 #define EVENT_QUEUE_LENGTH      32                      // Fila prioritária: notas, batidas e respostas

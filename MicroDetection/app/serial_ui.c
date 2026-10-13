@@ -464,10 +464,11 @@ static void act_type_ssid(void) {
 }
 
 static void act_reconnect(void) {
-    WifiCredentials cred;
-    hal_storage_load_wifi(&cred);
-    hal_wifi_reconnect(&cred);
-    ui_event(UI_EV_INFO, "Nova tentativa de conexao com \"%s\"", cred.ssid);
+    HalWifiDiag d;
+    hal_wifi_get_diag(&d);
+    hal_wifi_retry();                                   // Recomeça pela rede escolhida
+    ui_event(UI_EV_INFO, "Nova tentativa de conexao com \"%s\"",
+             d.primary_ssid[0] ? d.primary_ssid : d.ssid);
     go(SCR_WIFI_DETAIL);
 }
 
@@ -692,7 +693,11 @@ static void render_wifi_detail(void) {
     hal_wifi_mac(mac);
     static const char *states[] = {"conectando", "CONECTADO", "rede propria (modo AP)"};
     line(ST_TITLE, " DETALHES DA CONEXAO WI-FI" ST_SOFT "   (atualiza sozinho)");
-    line(ST_TEXT, " Rede configurada:   %s", d.ssid[0] ? d.ssid : "(nenhuma)");
+    line(ST_TEXT, " Rede em uso:        %s%s", d.ssid[0] ? d.ssid : "(nenhuma)",
+         d.on_fallback ? " (rede padrao)" : "");
+    if (d.on_fallback) {
+        line(ST_ERROR, " Rede escolhida:     %s (nao conectou)", d.primary_ssid);
+    }
     line(ST_TEXT, " Situacao:           %s%s", states[d.state],
          d.scanning ? " - procurando redes" : "");
     line(ST_TEXT, " IP:                 %s", ip);
@@ -899,16 +904,16 @@ static void render(void) {
 
 // ======================= CAMPOS DE TEXTO =====================================
 
+/* Conecta à rede escolhida no menu; se ela falhar, volta para a rede padrão. */
 static void save_wifi(const char *ssid, const char *password) {
-    WifiCredentials cred;
+    WifiCredentials cred, fallback;
     memset(&cred, 0, sizeof(cred));
     strncpy(cred.ssid, ssid, HAL_SSID_MAX);
     strncpy(cred.password, password, HAL_PASS_MAX);
-    if (!hal_storage_save_wifi(&cred)) {
-        ui_event(UI_EV_WARN, "Nao foi possivel salvar a rede na memoria (NVS)");
-    }
-    ui_event(UI_EV_INFO, "Rede \"%s\" salva. Conectando...", cred.ssid);
-    hal_wifi_reconnect(&cred);
+    hal_storage_default_wifi(&fallback);
+    ui_event(UI_EV_INFO, "Conectando a \"%s\" (reserva: rede padrao)...", cred.ssid);
+    hal_wifi_reconnect(&cred, &fallback);
+    memset(&cred, 0, sizeof(cred));
     memset(&s_in, 0, sizeof(s_in));                     // Não deixa a senha na RAM do menu
     go(SCR_WIFI_DETAIL);
 }

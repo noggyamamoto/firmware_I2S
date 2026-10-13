@@ -11,6 +11,7 @@
 
 #include "app_state.h"
 #include "config.h"
+#include "hal_net.h"
 #include "hal_time.h"
 #include "link_service.h"
 
@@ -233,8 +234,13 @@ static int pairing_hint(DiagProblem *p) {
     char ip[24];
     hal_wifi_ip_str(ip, sizeof(ip));
     set_title(p, UI_EV_INFO, "Pronto. Aguardando o app se conectar");
-    add_action(p, "No app: Conectar dispositivo > Buscar (celular na mesma rede Wi-Fi).");
-    add_action(p, "Nao apareceu? Use \"Conectar pelo IP\" com %s.", ip);
+    add_action(p, "O app procura sozinho ao abrir (celular/computador na mesma rede Wi-Fi).");
+    if (hal_net_has_mdns()) {
+        add_action(p, "Nao apareceu? Use \"Conectar pelo IP\" com %s ou %s.local.", ip,
+                   MDNS_HOSTNAME);
+    } else {
+        add_action(p, "Nao apareceu? Use \"Conectar pelo IP\" com %s.", ip);
+    }
     return 1;
 }
 

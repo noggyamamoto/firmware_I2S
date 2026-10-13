@@ -17,6 +17,16 @@
 #include "config.h"
 #include "protocol.h"
 
+// mDNS (componente espressif/mdns, declarado em app/idf_component.yml). Se o
+// componente não estiver disponível, o firmware compila sem o anúncio e o
+// app continua achando o dispositivo por broadcast ou pelo IP.
+#if __has_include("mdns.h")
+#include "mdns.h"
+#define HAVE_MDNS 1
+#else
+#define HAVE_MDNS 0
+#endif
+
 static const char *TAG = "net";
 
 #define RX_BUFFER_SIZE  128                     // Maior comando do app
@@ -188,6 +198,28 @@ bool hal_net_init(hal_net_rx_cb on_receive) {
     if (!udp_open()) return false;
     ws_open();                                      // Opcional: falha não impede o UDP
     return true;
+}
+
+void hal_net_advertise(const char *hostname, const char *instance) {
+#if HAVE_MDNS
+    if (mdns_init() != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS nao iniciou: o app ainda encontra o dispositivo pelo IP");
+        return;
+    }
+    mdns_hostname_set(hostname);
+    mdns_instance_name_set(instance);
+    mdns_service_add(instance, "_partitura", "_udp", PROTO_DEVICE_PORT, NULL, 0);
+    mdns_service_add(instance, "_http", "_tcp", WS_PORT, NULL, 0);
+    ESP_LOGI(TAG, "Anunciado na rede local como %s.local", hostname);
+#else
+    (void)hostname;
+    (void)instance;
+    ESP_LOGW(TAG, "mDNS indisponivel neste build (componente espressif/mdns)");
+#endif
+}
+
+bool hal_net_has_mdns(void) {
+    return HAVE_MDNS;
 }
 
 void hal_net_start(void) {
