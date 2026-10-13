@@ -34,6 +34,8 @@ static uint32_t        s_mask_until_ms = 0;
 static float           s_mask_hz = 0.0f;
 static bool            s_mask_pending = false;
 
+static float           s_probe_db[PITCH_PROBE_COUNT];   // Afinador: f/4, f/3, f/2, f, 2f
+static portMUX_TYPE    s_probe_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t  s_process_us = 0;
 static volatile float     s_level_db = -120.0f;
 static volatile float     s_last_pitch = 0.0f;
@@ -97,6 +99,12 @@ void audio_pipeline_mask_click(uint32_t click_ms, float click_hz) {
 
 uint32_t audio_pipeline_process_time_us(void) { return s_process_us; }
 uint32_t audio_pipeline_clock_resyncs(void) { return hal_audio_resync_count(); }
+
+void audio_pipeline_harmonic_levels(float out_db[PITCH_PROBE_COUNT]) {
+    portENTER_CRITICAL(&s_probe_lock);
+    memcpy(out_db, s_probe_db, sizeof(s_probe_db));
+    portEXIT_CRITICAL(&s_probe_lock);
+}
 float audio_pipeline_level_db(void) { return s_level_db; }
 float audio_pipeline_last_pitch_hz(void) { return s_last_pitch; }
 MicStatus audio_pipeline_mic_status(void) { return s_mic_status; }
@@ -202,6 +210,13 @@ static void audio_task(void *arg) {
         float freq = pitch_process(&s_pitch, s_hop, HOP_SAMPLES, &confidence);
         s_level_db = hop_db;
         s_last_pitch = freq;
+        if (freq > 0.0f) {
+            float probe[PITCH_PROBE_COUNT];
+            pitch_harmonic_levels(&s_pitch, freq, probe);
+            portENTER_CRITICAL(&s_probe_lock);
+            memcpy(s_probe_db, probe, sizeof(probe));
+            portEXIT_CRITICAL(&s_probe_lock);
+        }
 
         // 4) Estado da sessão
         SessionInfo session = app_state_session();

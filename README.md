@@ -4,6 +4,12 @@ Firmware do dispositivo embarcado do TCC **Sistema de Processamento de Áudio co
 
 O dispositivo capta o som do teclado com o microfone digital **INMP441 (I2S)**, identifica as notas tocadas (altura e duração), envia os eventos ao [aplicativo Flutter](https://github.com/noggyamamoto/Flutter_App) por **Wi-Fi** e executa o metrônomo sonoro (buzzer) e visual (LED RGB). O app compara as notas recebidas com a partitura MusicXML e devolve o feedback ao aluno.
 
+### Novidades da versão 1.3.1
+
+| Feature (commit) | O que mudou |
+|---|---|
+| **Oitava correta com alto-falante pequeno** (`oitava-correta-alto-falante-pequeno`) | Na 1.3.0 o E4 ainda saía como E6 quando o som vinha de um alto-falante pequeno (teclado ou celular), que quase não reproduz abaixo de ~1,2 kHz: só o 4º harmônico chegava forte ao microfone. A confirmação do período verdadeiro passa a usar também as componentes acima do harmônico (5º, 7º...), que esse alto-falante reproduz. O afinador (Menu 3 › 3) mostra a energia em f/4, f/3, f/2, f e 2f para diagnóstico |
+
 ### Novidades da versão 1.3.0
 
 | Feature (commit) | O que mudou |
@@ -887,7 +893,7 @@ Problemas diagnosticados e explicados no menu:
 | Teste | Comando | O que valida |
 |---|---|---|
 | DSP no computador | `make -C MicroDetection/test/host` | Filtro, detector de altura e segmentação com sinais sintéticos de teclado, ruído de sala e cliques do metrônomo; A0 a C8, 4º harmônico dominante (E4 não vira E6), fusas em B6, cliques sobre nota longa e nota repetida |
-| Altura (88 notas) | `make -C MicroDetection/test/host pitch` | Todas as notas do piano com inarmonicidade de corda: perfil de teclado e senoide (A0–C8), fundamental fraca (A0–A6) e 4º harmônico dominante (A0–F#5); erro médio de afinação ≤ 25 cents |
+| Altura (88 notas) | `make -C MicroDetection/test/host pitch` | Todas as notas do piano com inarmonicidade de corda: perfil de teclado e senoide (A0–C8), fundamental fraca (A0–A6), 4º harmônico dominante (A0–F#5) e alto-falante pequeno com corte em 1,2 kHz (A3–C7); erro médio de afinação ≤ 25 cents |
 | Monitor da execução | `make -C MicroDetection/test/host monitor` | Linhas ESPERADO/CAPTADO, figuras, contagem de entrada e resumo, somente ASCII |
 | Dispositivo falso (UDP) | `make -C MicroDetection/test/host fake_device && ./MicroDetection/test/host/fake_device` | Protocolo completo para testar o app sem hardware (descoberta, pareamento, batidas e escala de Dó) |
 | Ponte WebSocket | `python3 MicroDetection/test/host/ws_bridge.py 80` (com o `fake_device` rodando) | App web conversando com o dispositivo falso por `ws://127.0.0.1/ws` |
@@ -917,7 +923,7 @@ flutter test --platform chrome --dart-define=WS_DEVICE=true \
 | App web não conecta | Página aberta por `https://` ou IP errado | Abra o app web por `http://` e informe o IP do dispositivo |
 | Menu mostra "Microfone sem sinal" | Ligações do INMP441 | Confira SCK/WS/SD, VDD em 3V3 e L/R em GND (o menu mostra os pinos da placa) |
 | Notas falsas com o metrônomo | Buzzer muito próximo do microfone | Afaste o buzzer ou reduza o volume; ajuste `CLICK_MASK_MS` |
-| Nota lida uma ou duas oitavas acima | Harmônico mais forte que a fundamental no som captado | Corrigido na 1.3.0 (correção de oitava). Se ainda ocorrer, afaste o microfone do alto-falante do teclado |
+| Nota lida uma ou duas oitavas acima | Harmônico mais forte que a fundamental no som captado (ex.: alto-falante pequeno) | Corrigido na 1.3.0/1.3.1 (correção de oitava). Se ainda ocorrer, abra o afinador (Menu 3 › 3), toque a nota e anote a linha "Energia em f/4 ... f/2 ... f": níveis abaixo de ~−40 dB em f/2 e f/4 indicam que a nota quase não chega ao microfone. Aproxime o microfone do alto-falante ou use fones/saída de linha do teclado |
 | Notas não detectadas | Nível baixo | Aproxime o microfone ou aumente `INPUT_GAIN`; verifique nível e piso de ruído no afinador (Menu 3 › 3) |
 
 ---
