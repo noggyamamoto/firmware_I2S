@@ -4,6 +4,12 @@ Firmware do dispositivo embarcado do TCC **Sistema de Processamento de Áudio co
 
 O dispositivo capta o som do teclado com o microfone digital **INMP441 (I2S)**, identifica as notas tocadas (altura e duração), envia os eventos ao [aplicativo Flutter](https://github.com/noggyamamoto/Flutter_App) por **Wi-Fi** e executa o metrônomo sonoro (buzzer) e visual (LED RGB). O app compara as notas recebidas com a partitura MusicXML e devolve o feedback ao aluno.
 
+### Novidades da versão 1.3.0
+
+| Feature (commit) | O que mudou |
+|---|---|
+| **Piano inteiro: A0 a C8** (`deteccao-piano-inteiro-a0-c8`) | Detecção das 88 notas do piano. Novo detector de altura com duas resoluções (16 kHz/32 ms para os agudos, 4 kHz/80 ms para os graves) e **correção de oitava**: um harmônico forte não é mais confundido com a nota (antes, um E4 com o 4º harmônico dominante era lido como E6). Passa-banda de 20 Hz a 5 kHz. Custo de processamento ~40% do YIN da versão 1.1.0 |
+
 ### Novidades da versão 1.2.0
 
 | Feature (commit) | O que mudou |
@@ -57,7 +63,7 @@ flowchart LR
 | Framework | ESP-IDF 5.x (FreeRTOS, `i2s_std`, LEDC, `esp_timer`, NVS, lwIP, `esp_http_server`) |
 | Ferramentas | PlatformIO ou `idf.py` (ESP-IDF) |
 | Placas | ESP32 DevKit V1 (MVP) e ESP32-S3 DevKitC-1 N16R8 (lista de materiais do TCC) |
-| Áudio | 16 kHz, 24 bits, janelas de 16 ms (hop) e 32 ms (análise); notas de C4 a C7 |
+| Áudio | 16 kHz, 24 bits, trechos de 16 ms; análise em 32 ms (agudos) e 80 ms (graves); notas de A0 a C8 (piano inteiro) |
 | Comunicação | UDP (porta 54322) para celular/computador e WebSocket (`ws://IP/ws`) para o app web |
 
 ---
@@ -69,7 +75,7 @@ flowchart LR
 | **RFE01** – Verificação de rede | Varredura das redes, conexão com novas tentativas, rede própria de reserva (modo AP) e LED de status | `hal_wifi`, `hal_indicators`, `app_state` |
 | **RFE02** – Metrônomo sonoro | Buzzer passivo por PWM, clique acentuado no tempo forte | `metronome`, `hal_indicators` |
 | **RFE03** – Metrônomo visual | LED RGB: azul (binário), verde (ternário), roxo (quaternário), amarelo na contagem | `metronome`, `hal_indicators` |
-| **RFE04** – Captação digital e filtragem | INMP441 via I2S (24 bits em slots de 32 bits) + passa-banda 200 Hz – 2,5 kHz | `drv_i2s_mic`, `hal_audio`, `dsp` |
+| **RFE04** – Captação digital e filtragem | INMP441 via I2S (24 bits em slots de 32 bits) + passa-banda 20 Hz – 5 kHz | `drv_i2s_mic`, `hal_audio`, `dsp` |
 | **RFE05** – Processamento digital de sinais | Altura pelo algoritmo **YIN** + segmentação em notas (ataque, soltura, duração) | `dsp`, `note_tracker`, `audio_pipeline` |
 | **RFE06** – Transmissão de dados | Pacotes binários com sequência e timestamp, por UDP ou WebSocket | `link_service`, `hal_net` |
 | **RNFE01** – Baixa latência | Janelas de 16 ms; tempo de processamento medido (menu serial, Status do sistema); notas com prioridade sobre os fluxos de diagnóstico | `audio_pipeline`, `app_state` |
@@ -541,10 +547,10 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["hal_audio_read<br/>256 amostras (16 ms)"] --> B["Passa-banda<br/>200 Hz – 2,5 kHz"]
-    B --> C["Janela deslizante<br/>512 amostras (32 ms)"]
+    A["hal_audio_read<br/>256 amostras (16 ms)"] --> B["Passa-banda<br/>20 Hz – 5 kHz"]
+    B --> C["Janelas deslizantes<br/>512 amostras a 16 kHz (32 ms)<br/>320 amostras a 4 kHz (80 ms)"]
     C --> D["Nível RMS (dBFS)"]
-    C --> E["YIN: frequência + confiança"]
+    C --> E["Altura: YIN nas duas faixas<br/>+ correção de oitava"]
     D --> F{"Sessão mudou?"}
     E --> F
     F -- sim --> G["Fecha nota aberta<br/>e reinicia o rastreador"]
@@ -706,8 +712,9 @@ Principais parâmetros de [`include/config.h`](MicroDetection/include/config.h):
 | | `HOP_SAMPLES` / `WINDOW_SAMPLES` | 256 / 512 | Passo (16 ms) e janela de análise (32 ms) |
 | | `INPUT_GAIN` | 4.0 | Ganho digital do INMP441 |
 | DSP | `BANDPASS_LOW_HZ` / `BANDPASS_HIGH_HZ` | 200 / 2500 | Faixa do filtro |
-| | `PITCH_MIN_HZ` / `PITCH_MAX_HZ` | 254 / 2100 | Faixa de altura do YIN (C4 – C7, com margem de −50 cents) |
-| | `MIN_MIDI_NOTE` / `MAX_MIDI_NOTE` | 60 / 96 | Notas aceitas (C4 – C7); abaixo do C4 não geram nota |
+| | `PITCH_MIN_HZ` / `PITCH_MAX_HZ` | 26,7 / 4400 | Faixa de altura (A0 – C8, com margem) |
+| | `PITCH_SPLIT_HZ` | 125 | Abaixo: faixa grave (sinal decimado para 4 kHz, janela de 80 ms); acima: faixa aguda (16 kHz, janela de 32 ms) |
+| | `MIN_MIDI_NOTE` / `MAX_MIDI_NOTE` | 21 / 108 | Notas aceitas (A0 – C8) |
 | | `YIN_THRESHOLD` / `MIN_CONFIDENCE` | 0.15 / 0.70 | Limiar do YIN e confiança mínima |
 | Notas | `GATE_MARGIN_DB` / `GATE_MIN_DB` | 12 / −62 | Margem sobre o piso de ruído e limiar absoluto |
 | | `STABLE_HOPS` / `MIN_NOTE_MS` | 2 / 60 | Confirmação da altura e duração mínima |
@@ -879,7 +886,8 @@ Problemas diagnosticados e explicados no menu:
 
 | Teste | Comando | O que valida |
 |---|---|---|
-| DSP no computador | `make -C MicroDetection/test/host` | Filtro, YIN e segmentação com sinais sintéticos de teclado, ruído de sala e cliques do metrônomo; faixa C4–C7 (notas abaixo do C4 ignoradas), fusas em B6, cliques sobre nota longa e nota repetida |
+| DSP no computador | `make -C MicroDetection/test/host` | Filtro, detector de altura e segmentação com sinais sintéticos de teclado, ruído de sala e cliques do metrônomo; A0 a C8, 4º harmônico dominante (E4 não vira E6), fusas em B6, cliques sobre nota longa e nota repetida |
+| Altura (88 notas) | `make -C MicroDetection/test/host pitch` | Todas as notas do piano com inarmonicidade de corda: perfil de teclado e senoide (A0–C8), fundamental fraca (A0–A6) e 4º harmônico dominante (A0–F#5); erro médio de afinação ≤ 25 cents |
 | Monitor da execução | `make -C MicroDetection/test/host monitor` | Linhas ESPERADO/CAPTADO, figuras, contagem de entrada e resumo, somente ASCII |
 | Dispositivo falso (UDP) | `make -C MicroDetection/test/host fake_device && ./MicroDetection/test/host/fake_device` | Protocolo completo para testar o app sem hardware (descoberta, pareamento, batidas e escala de Dó) |
 | Ponte WebSocket | `python3 MicroDetection/test/host/ws_bridge.py 80` (com o `fake_device` rodando) | App web conversando com o dispositivo falso por `ws://127.0.0.1/ws` |
@@ -909,7 +917,7 @@ flutter test --platform chrome --dart-define=WS_DEVICE=true \
 | App web não conecta | Página aberta por `https://` ou IP errado | Abra o app web por `http://` e informe o IP do dispositivo |
 | Menu mostra "Microfone sem sinal" | Ligações do INMP441 | Confira SCK/WS/SD, VDD em 3V3 e L/R em GND (o menu mostra os pinos da placa) |
 | Notas falsas com o metrônomo | Buzzer muito próximo do microfone | Afaste o buzzer ou reduza o volume; ajuste `CLICK_MASK_MS` |
-| Nota grave não aparece | Abaixo do C4 | A faixa de detecção começa no C4 (`MIN_MIDI_NOTE`) |
+| Nota lida uma ou duas oitavas acima | Harmônico mais forte que a fundamental no som captado | Corrigido na 1.3.0 (correção de oitava). Se ainda ocorrer, afaste o microfone do alto-falante do teclado |
 | Notas não detectadas | Nível baixo | Aproxime o microfone ou aumente `INPUT_GAIN`; verifique nível e piso de ruído no afinador (Menu 3 › 3) |
 
 ---

@@ -19,7 +19,6 @@
 
 #define FS       16000
 #define HOP      256
-#define WINDOW   512
 
 typedef struct { int midi; double start; double dur; } Expected;
 
@@ -33,7 +32,11 @@ static double noise(void) {
     return sqrt(-2.0 * log(u1)) * cos(2 * M_PI * u2);
 }
 
-/* Síntese de um som de teclado: 6 harmônicos, ataque de 5 ms, decaimento e soltura. */
+/* Amplitude de cada harmônico (1..8): padrão = teclado (1/k). */
+static const double KEYBOARD[8] = {1.0, 1.0 / 2, 1.0 / 3, 1.0 / 4, 1.0 / 5, 1.0 / 6, 0, 0};
+static const double *s_harmonics = KEYBOARD;
+
+/* Síntese de um som de teclado: harmônicos, ataque de 5 ms, decaimento e soltura. */
 static void render_note(float *buf, size_t len, int midi, double start, double dur, double amp) {
     double f0 = 440.0 * pow(2.0, (midi - 69) / 12.0);
     size_t s0 = (size_t)(start * FS);
@@ -44,9 +47,9 @@ static void render_note(float *buf, size_t len, int midi, double start, double d
         double env = fmin(1.0, t / 0.005) * exp(-t / 0.9);  // Ataque + decaimento natural
         if (i >= n_note) env *= exp(-((double)(i - n_note) / FS) / 0.008);  // Soltura rápida
         double s = 0;
-        for (int k = 1; k <= 6; k++) {
-            if (f0 * k > FS / 2) break;
-            s += sin(2 * M_PI * f0 * k * t) / k;
+        for (int k = 1; k <= 8; k++) {
+            if (f0 * k > FS / 2 - 500) break;
+            s += s_harmonics[k - 1] * sin(2 * M_PI * f0 * k * t);
         }
         buf[s0 + i] += (float)(amp * env * s);
     }
@@ -73,16 +76,15 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
     for (size_t i = 0; i < len; i++) sig[i] += (float)(noise_amp * noise());
 
     BandpassFilter filt;
-    bandpass_init(&filt, FS, 200.0f, 2500.0f);
-    static float diff[WINDOW / 2 + 1];
-    YinDetector yin;
-    yin_init(&yin, FS, WINDOW, 254.0f, 2100.0f, 0.15f, diff);
+    bandpass_init(&filt, FS, 20.0f, 5000.0f);
+    static PitchDetector pitch;
+    pitch_init(&pitch, FS, 26.7f, 4400.0f, 125.0f, 0.15f);
+    pitch_reset(&pitch);
     NoteTrackerConfig cfg;
     note_tracker_default_config(&cfg);
     NoteTracker tr;
     note_tracker_init(&tr, &cfg);
 
-    float window[WINDOW] = {0};
     NoteEvent got[64];
     int n_got = 0;
     int ci = 0;
@@ -90,8 +92,6 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
         float hop[HOP];
         memcpy(hop, sig + pos, sizeof(hop));
         bandpass_process(&filt, hop, HOP);
-        memmove(window, window + HOP, (WINDOW - HOP) * sizeof(float));
-        memcpy(window + WINDOW - HOP, hop, sizeof(hop));
         uint32_t t_ms = (uint32_t)(pos * 1000 / FS);
         while (ci < n_clicks && clicks[ci] * 1000 <= t_ms + 16) {
             uint32_t c = (uint32_t)(clicks[ci] * 1000);
@@ -99,7 +99,7 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
             ci++;
         }
         float conf = 0;
-        float f = yin_detect(&yin, window, &conf);
+        float f = pitch_process(&pitch, hop, HOP, &conf);
         NoteEvent ev[2];
         int n = note_tracker_process(&tr, t_ms, dsp_rms_db(hop, HOP), f, conf, ev);
         for (int k = 0; k < n && n_got < 64; k++) got[n_got++] = ev[k];
@@ -151,10 +151,10 @@ static int run_case(const char *name, const Expected *exp_notes, int n_exp, doub
 int main(void) {
     srand(42);
 
-    // Melodia simples com nota repetida (Mi-Mi) e saltos, a partir do C4
+    // Melodia simples com nota repetida (Mi-Mi) e saltos, do grave ao agudo
     const Expected melody[] = {
         {60, 0.30, 0.45}, {62, 0.90, 0.45}, {64, 1.50, 0.40}, {64, 1.95, 0.40},
-        {67, 2.50, 0.90}, {72, 3.60, 0.30}, {77, 4.10, 0.60}, {83, 5.00, 0.80},
+        {67, 2.50, 0.90}, {72, 3.60, 0.30}, {57, 4.10, 0.60}, {48, 5.00, 0.80},
     };
     run_case("melodia em sala silenciosa", melody, 8, 6.2, -80.0, 0.05, NULL, 0, 1);
 
@@ -174,9 +174,9 @@ int main(void) {
     // altura e o ataque são verificados neste caso.
     run_case("volume baixo com ruido forte", melody, 8, 6.2, -50.0, 0.012, NULL, 0, 0);
 
-    // Nota grave e aguda nos extremos da faixa
-    const Expected extremes[] = {{60, 0.3, 0.8}, {96, 1.4, 0.5}};
-    run_case("extremos da faixa (C4 e C7)", extremes, 2, 2.3, -80.0, 0.05, NULL, 0, 1);
+    // Notas dos extremos (A0 e C8)
+    const Expected extremes[] = {{21, 0.3, 1.0}, {108, 1.6, 0.5}};
+    run_case("extremos da faixa (A0 e C8)", extremes, 2, 2.5, -80.0, 0.05, NULL, 0, 0);
 
     // Notas rapidas: fusas a 100 BPM (75 ms) na regiao de B6
     const Expected fusas[] = {
@@ -195,11 +195,22 @@ int main(void) {
     const Expected repeated[] = {{67, 0.30, 0.36}, {67, 0.70, 0.36}, {67, 1.10, 0.50}};
     run_case("nota repetida rapidamente", repeated, 3, 2.0, -80.0, 0.05, NULL, 0, 0);
 
-    // Notas abaixo do C4 (A3 e F3) nao geram nota; a seguinte (C4) sim
-    const Expected low_played[] = {{57, 0.3, 0.5}, {53, 1.0, 0.5}, {60, 1.7, 0.5}};
-    const Expected low_expected[] = {{60, 1.7, 0.5}};
-    run_case_ex("notas abaixo do C4 sao ignoradas", low_played, 3, low_expected, 1, 2.5, -80.0,
-                0.05, NULL, 0, 1);
+    // Graves e agudos do piano: A0, C1, A1, C3, C6, B6, C8
+    const Expected range[] = {
+        {21, 0.30, 0.90}, {24, 1.40, 0.70}, {33, 2.30, 0.60}, {48, 3.10, 0.50},
+        {84, 3.80, 0.40}, {95, 4.40, 0.40}, {108, 5.00, 0.40},
+    };
+    run_case("piano inteiro: A0, C1, A1, C3, C6, B6 e C8", range, 7, 5.8, -80.0, 0.05, NULL, 0, 0);
+
+    // Caso real (monitor serial): E4, F4 e G4 lidos como E6, F6 e G6. O som
+    // captado tinha o 4o harmonico muito mais forte que a fundamental
+    static const double FOURTH[8] = {0.1, 0.1, 0.1, 1.0, 0.1, 0.05, 0.03, 0.1};
+    s_harmonics = FOURTH;
+    const Expected strong4[] = {
+        {64, 0.30, 0.70}, {64, 1.10, 0.70}, {65, 1.90, 0.70}, {67, 2.70, 0.70}, {67, 3.50, 0.70},
+    };
+    run_case("4o harmonico dominante (E4 nao vira E6)", strong4, 5, 4.4, -80.0, 0.05, NULL, 0, 0);
+    s_harmonics = KEYBOARD;
 
     if (failures == 0) {
         printf("\nTODOS OS TESTES PASSARAM\n");

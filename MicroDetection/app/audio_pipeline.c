@@ -23,11 +23,9 @@
 
 static const char *TAG = "audio";
 
-static BandpassFilter  s_filter;                    // Passa-banda 200 Hz – 2,5 kHz
-static YinDetector     s_yin;                       // Detector de altura
+static BandpassFilter  s_filter;                    // Passa-banda 20 Hz – 5 kHz
+static PitchDetector   s_pitch;                     // Altura: A0 a C8 (duas resoluções)
 static NoteTracker     s_tracker;                   // Segmentação de notas
-static float           s_window[WINDOW_SAMPLES];    // Janela deslizante de análise
-static float           s_yin_diff[WINDOW_SAMPLES / 2 + 1];
 static float           s_hop[HOP_SAMPLES];          // Trecho mais recente
 
 static portMUX_TYPE    s_mask_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -61,8 +59,8 @@ bool audio_pipeline_init(void) {
     }
 
     bandpass_init(&s_filter, SAMPLE_RATE, BANDPASS_LOW_HZ, BANDPASS_HIGH_HZ);
-    yin_init(&s_yin, SAMPLE_RATE, WINDOW_SAMPLES, PITCH_MIN_HZ, PITCH_MAX_HZ,
-             YIN_THRESHOLD, s_yin_diff);
+    pitch_init(&s_pitch, SAMPLE_RATE, PITCH_MIN_HZ, PITCH_MAX_HZ, PITCH_SPLIT_HZ, YIN_THRESHOLD);
+    pitch_reset(&s_pitch);
 
     NoteTrackerConfig cfg;
     note_tracker_default_config(&cfg);
@@ -80,10 +78,8 @@ bool audio_pipeline_init(void) {
     cfg.max_midi = MAX_MIDI_NOTE;
     note_tracker_init(&s_tracker, &cfg);
 
-    memset(s_window, 0, sizeof(s_window));
-    ESP_LOGI(TAG, "Passa-banda %.0f-%.0f Hz, YIN %.0f-%.0f Hz (tau %u..%u)",
-             BANDPASS_LOW_HZ, BANDPASS_HIGH_HZ, PITCH_MIN_HZ, PITCH_MAX_HZ,
-             (unsigned)s_yin.tau_min, (unsigned)s_yin.tau_max);
+    ESP_LOGI(TAG, "Passa-banda %.0f-%.0f Hz, altura %.1f-%.0f Hz (A0 a C8)",
+             BANDPASS_LOW_HZ, BANDPASS_HIGH_HZ, PITCH_MIN_HZ, PITCH_MAX_HZ);
     return true;
 }
 
@@ -199,14 +195,11 @@ static void audio_task(void *arg) {
         // 1) Filtragem passa-banda (RNFE03)
         bandpass_process(&s_filter, s_hop, HOP_SAMPLES);
 
-        // 2) Atualiza a janela deslizante de 1024 amostras
-        memmove(s_window, s_window + HOP_SAMPLES, (WINDOW_SAMPLES - HOP_SAMPLES) * sizeof(float));
-        memcpy(s_window + WINDOW_SAMPLES - HOP_SAMPLES, s_hop, HOP_SAMPLES * sizeof(float));
-
-        // 3) Nível e altura (RFE05)
+        // 2) Nível e altura (RFE05): janelas de 32 ms (agudos) e 80 ms
+        //    (graves), com correção de oitava (harmônico forte não vira a nota)
         float hop_db = dsp_rms_db(s_hop, HOP_SAMPLES);
         float confidence = 0.0f;
-        float freq = yin_detect(&s_yin, s_window, &confidence);
+        float freq = pitch_process(&s_pitch, s_hop, HOP_SAMPLES, &confidence);
         s_level_db = hop_db;
         s_last_pitch = freq;
 
