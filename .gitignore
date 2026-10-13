@@ -55,3 +55,4 @@ dkms.conf
 *.dwo
 MicroDetection/test/host/test_pipeline
 MicroDetection/test/host/fake_device
+MicroDetection/test/host/test_monitor
