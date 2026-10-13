@@ -159,8 +159,9 @@ bool wifi_setup_ask(WifiCredentials *out) {
         }
         if (r == READ_EMPTY) pass[0] = '\0';
         if (hal_wifi_check_password(pass) == HAL_WIFI_ERR_NONE) {
-            strncpy(out->ssid, ssid, HAL_SSID_MAX);
-            strncpy(out->password, pass, HAL_PASS_MAX);
+            // `out` foi zerado no início: os terminadores já estão no lugar
+            memcpy(out->ssid, ssid, strnlen(ssid, HAL_SSID_MAX));
+            memcpy(out->password, pass, strnlen(pass, HAL_PASS_MAX));
             memset(pass, 0, sizeof(pass));
             hal_console_printf("  Conectando a \"%s\" (reserva: rede padrao)...\r\n", out->ssid);
             drain_input();

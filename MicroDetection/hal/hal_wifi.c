@@ -119,7 +119,7 @@ static void update_scan_info(void) {
             }
             seen = true;
         } else if (similar[0] == '\0' && similar_name(s_scan[i].ssid, s_cred.ssid)) {
-            strncpy(similar, s_scan[i].ssid, sizeof(similar) - 1);
+            memcpy(similar, s_scan[i].ssid, strnlen(s_scan[i].ssid, sizeof(similar) - 1));
         }
     }
     LOCK();
@@ -127,7 +127,12 @@ static void update_scan_info(void) {
     s_seen_rssi = seen ? rssi : 0;
     s_seen_channel = channel;
     s_seen_auth = auth;
-    memcpy(s_similar, seen ? "" : similar, sizeof(s_similar));
+    // Antes: memcpy de 33 bytes a partir de "" (lia além da string literal)
+    if (seen) {
+        s_similar[0] = '\0';
+    } else {
+        memcpy(s_similar, similar, sizeof(s_similar));
+    }
     UNLOCK();
 }
 
