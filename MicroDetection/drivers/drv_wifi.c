@@ -73,8 +73,8 @@ void drv_wifi_set_station(const char *ssid, const char *password) {
     wifi_config_t cfg = {0};
     // Campos de tamanho fixo (32/64 bytes) sem terminador obrigatório: um SSID
     // de 32 caracteres ou uma chave de 64 dígitos hexadecimais são válidos
-    strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
-    strncpy((char *)cfg.sta.password, password, sizeof(cfg.sta.password));
+    memcpy(cfg.sta.ssid, ssid, strnlen(ssid, sizeof(cfg.sta.ssid)));
+    memcpy(cfg.sta.password, password, strnlen(password, sizeof(cfg.sta.password)));
     cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;            // Procura em todos os canais
     cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;        // Repetidores/mesh: o mais forte
     cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;            // Aceita qualquer segurança anunciada

@@ -912,9 +912,9 @@ static void render(void) {
 /* Conecta à rede escolhida no menu; se ela falhar, volta para a rede padrão. */
 static void save_wifi(const char *ssid, const char *password) {
     WifiCredentials cred, fallback;
-    memset(&cred, 0, sizeof(cred));
-    strncpy(cred.ssid, ssid, HAL_SSID_MAX);
-    strncpy(cred.password, password, HAL_PASS_MAX);
+    memset(&cred, 0, sizeof(cred));                     // Terminadores já zerados
+    memcpy(cred.ssid, ssid, strnlen(ssid, HAL_SSID_MAX));
+    memcpy(cred.password, password, strnlen(password, HAL_PASS_MAX));
     hal_storage_default_wifi(&fallback);
     ui_event(UI_EV_INFO, "Conectando a \"%s\" (reserva: rede padrao)...", cred.ssid);
     hal_wifi_reconnect(&cred, &fallback);

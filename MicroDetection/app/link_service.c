@@ -64,8 +64,10 @@ static void tx_task(void *arg) {
             case OUT_ANNOUNCE: {
                 PktAnnounce p = {0};
                 fill_header(&p.h, PKT_ANNOUNCE, ev.timestamp_ms);
-                strncpy(p.name, hal_wifi_device_name(), PROTO_NAME_LEN);
-                strncpy(p.firmware, FIRMWARE_VERSION, PROTO_FW_LEN);
+                // Campos de tamanho fixo, sem terminador obrigatório (p zerado)
+                const char *name = hal_wifi_device_name();
+                memcpy(p.name, name, strnlen(name, PROTO_NAME_LEN));
+                memcpy(p.firmware, FIRMWARE_VERSION, strnlen(FIRMWARE_VERSION, PROTO_FW_LEN));
                 hal_wifi_mac(p.mac);
                 p.state = app_state_device_state();
                 p.rssi = hal_wifi_rssi();
