@@ -4,6 +4,7 @@
  *
  *  - Filtro passa-banda (cascata de biquads passa-alta + passa-baixa)
  *  - Estimativa de frequência fundamental pelo algoritmo YIN
+ *  - Detector de altura de duas resoluções (A0 a C8) com correção de oitava
  *  - Conversões auxiliares (Hz <-> MIDI, RMS em dBFS)
  *
  * Este módulo não depende do ESP-IDF e é compilado também no computador
@@ -13,6 +14,7 @@
 #ifndef DSP_H
 #define DSP_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -71,6 +73,47 @@ void yin_init(YinDetector *y, float fs, size_t window, float fmin, float fmax,
  * @return Frequência em Hz ou 0 se o trecho não tiver altura definida.
  */
 float yin_detect(YinDetector *y, const float *window, float *confidence);
+
+/* Detector de altura do piano inteiro (A0 a C8): YIN em duas resoluções
+ * (taxa cheia para os agudos, taxa/4 para os graves) com correção de oitava
+ * (harmônico forte não é confundido com a nota). Ver dsp.c. */
+#define PITCH_HIGH_WINDOW       512     // 32 ms a 16 kHz (períodos até 128 amostras)
+#define PITCH_LOW_DECIMATION    4       // Faixa grave a 4 kHz
+#define PITCH_LOW_WINDOW        320     // 80 ms a 4 kHz (períodos até ~150 amostras)
+
+typedef struct {
+    float       fs;
+    int         decimation;
+    int         phase;                                  // Posição na decimação
+    size_t      low_split_tau;                          // Período (faixa grave) de split_hz
+    Biquad      aa[2];                                  // Antisserrilhado (4ª ordem)
+    YinDetector high;                                   // Faixa aguda (taxa cheia)
+    YinDetector low;                                    // Faixa grave (decimada)
+    float       high_window[PITCH_HIGH_WINDOW];
+    float       low_window[PITCH_LOW_WINDOW];
+    float       high_diff[PITCH_HIGH_WINDOW / 2 + 1];
+    float       low_diff[PITCH_LOW_WINDOW / 2 + 1];
+    float       high_hann[PITCH_HIGH_WINDOW];           // Janelas de Hann (Goertzel)
+    float       low_hann[PITCH_LOW_WINDOW];
+} PitchDetector;
+
+/**
+ * @brief Configura o detector.
+ * @param fmin/fmax  Faixa de frequências (ex.: A0 - 50 cents a C8 + margem).
+ * @param split_hz   Menor frequência analisada na taxa cheia (~125 Hz).
+ */
+void pitch_init(PitchDetector *p, float fs, float fmin, float fmax, float split_hz,
+                float threshold);
+
+/** @brief Zera as janelas (ex.: após falha de leitura). */
+void pitch_reset(PitchDetector *p);
+
+/**
+ * @brief Acrescenta um trecho filtrado e estima a altura das janelas atuais.
+ * @param confidence Saída: 1 - aperiodicidade no período escolhido (0..1).
+ * @return Frequência em Hz ou 0 se não houver altura definida.
+ */
+float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confidence);
 
 /** @brief Converte frequência para número MIDI (fracionário). */
 float dsp_hz_to_midi(float hz);

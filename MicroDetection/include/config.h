@@ -22,7 +22,7 @@
 
 #include "sdkconfig.h"
 
-#define FIRMWARE_VERSION        "1.2.0"                 // Versão enviada no ANNOUNCE
+#define FIRMWARE_VERSION        "1.3.0"                 // Versão enviada no ANNOUNCE
 #define DEVICE_NAME_PREFIX      "PartituraIoT"          // Prefixo do nome do dispositivo
 
 // ======================= PINOS ==============================================
@@ -67,18 +67,20 @@
 // ======================= ÁUDIO ==============================================
 #define SAMPLE_RATE             16000                   // Taxa de amostragem: 16 kHz
 #define HOP_SAMPLES             256                     // Amostras lidas por iteração (16 ms)
-#define WINDOW_SAMPLES          512                     // Janela de análise do YIN (32 ms): a partir
-                                                        // do C4 cabem mais de 8 períodos na janela
+// Janelas de análise da altura: ver PITCH_HIGH_WINDOW / PITCH_LOW_WINDOW em
+// dsp.h (32 ms a 16 kHz para os agudos e 80 ms a 4 kHz para os graves)
 #define BLOCK_SAMPLES           1024                    // Amostras por quadro bruto (modo diagnóstico)
 #define INPUT_GAIN              4.0f                    // Ganho digital aplicado ao sinal do INMP441
 
 // ======================= DSP ================================================
-#define BANDPASS_LOW_HZ         200.0f                  // Corte inferior do passa-banda (abaixo do C4)
-#define BANDPASS_HIGH_HZ        2500.0f                 // Corte superior do passa-banda
-#define PITCH_MIN_HZ            254.0f                  // Dó 4 (C4 = 261,6 Hz) com margem de -50 cents
-#define PITCH_MAX_HZ            2100.0f                 // Dó 7 (C7)
-#define MIN_MIDI_NOTE           60                      // C4: notas abaixo são ignoradas
-#define MAX_MIDI_NOTE           96                      // C7
+// Piano inteiro: A0 (27,5 Hz) a C8 (4186 Hz)
+#define BANDPASS_LOW_HZ         20.0f                   // Corte inferior (abaixo do A0)
+#define BANDPASS_HIGH_HZ        5000.0f                 // Corte superior (acima do C8)
+#define PITCH_MIN_HZ            26.7f                   // A0 (27,5 Hz) com margem de -50 cents
+#define PITCH_MAX_HZ            4400.0f                 // C8 (4186 Hz) com margem
+#define PITCH_SPLIT_HZ          125.0f                  // Abaixo: faixa grave (decimada, janela longa)
+#define MIN_MIDI_NOTE           21                      // A0
+#define MAX_MIDI_NOTE           108                     // C8
 #define YIN_THRESHOLD           0.15f                   // Limiar de aperiodicidade do YIN
 #define MIN_CONFIDENCE          0.70f                   // Confiança mínima para aceitar a altura
 

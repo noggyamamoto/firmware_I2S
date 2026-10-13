@@ -1,0 +1,110 @@
+/*
+ * ============================================================================
+ * Teste do detector de altura (dsp.c: pitch_process) no computador
+ *
+ * Toca as 88 notas do piano (A0 a C8), com inarmonicidade de corda e
+ * diferentes perfis de harmonicos, e confere a nota MIDI em cada janela
+ * depois que as janelas estao cheias (90% das janelas no minimo) e o erro
+ * medio de afinacao.
+ *
+ * Compilar e executar:  make -C test/host pitch
+ * ============================================================================
+ */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "dsp.h"
+
+#define FS   16000
+#define HOP  256
+
+typedef struct {
+    const char *name;
+    float harmonics[8];
+    int first_midi, last_midi;          // Faixa em que o perfil e realista
+} Profile;
+
+static const Profile PROFILES[] = {
+    // Teclado/piano: harmonicos decrescentes
+    {"teclado", {1.0f, 0.5f, 0.33f, 0.25f, 0.2f, 0.17f, 0.14f, 0.12f}, 21, 108},
+    // Senoide pura (notas agudas do piano sao quase senoidais)
+    {"senoide", {1.0f, 0, 0, 0, 0, 0, 0, 0}, 21, 108},
+    // Graves do piano: fundamental quase ausente
+    {"fundamental fraca", {0.05f, 0.6f, 1.0f, 0.7f, 0.4f, 0.3f, 0.2f, 0.1f}, 21, 93},
+    // Caso real do monitor serial: 4o harmonico dominante (E4 lido como E6)
+    {"4o harmonico dominante", {0.1f, 0.1f, 0.1f, 1.0f, 0.1f, 0.05f, 0.03f, 0.1f}, 21, 78},
+};
+
+static PitchDetector s_pitch;
+
+int main(void) {
+    int failures = 0;
+    double worst_cents = 0;
+    srand(7);
+    for (size_t p = 0; p < sizeof(PROFILES) / sizeof(PROFILES[0]); p++) {
+        const Profile *pr = &PROFILES[p];
+        int ok_notes = 0;
+        for (int midi = pr->first_midi; midi <= pr->last_midi; midi++) {
+            const double f0 = 440.0 * pow(2.0, (midi - 69) / 12.0);
+            const double B = 0.0004;                        // Inarmonicidade da corda
+            const size_t len = FS * 6 / 10;
+            float *x = calloc(len, sizeof(float));
+            for (size_t i = 0; i < len; i++) {
+                double t = (double)i / FS, s = 0;
+                for (int h = 1; h <= 8; h++) {
+                    double fh = f0 * h * sqrt(1 + B * h * h);
+                    if (fh < FS / 2 - 500) s += pr->harmonics[h - 1] * sin(2 * M_PI * fh * t + h);
+                }
+                x[i] = (float)(0.05 * s * exp(-t / 1.2) + 2e-4 * (rand() / (double)RAND_MAX - 0.5));
+            }
+            BandpassFilter bp;
+            bandpass_init(&bp, FS, 20.0f, 5000.0f);
+            pitch_init(&s_pitch, FS, 26.7f, 4400.0f, 125.0f, 0.15f);
+            pitch_reset(&s_pitch);
+            int ok = 0, total = 0;
+            double cents = 0;
+            float last = 0;
+            for (size_t pos = 0; pos + HOP <= len; pos += HOP) {
+                float hop[HOP];
+                memcpy(hop, x + pos, sizeof(hop));
+                bandpass_process(&bp, hop, HOP);
+                float conf;
+                float f = pitch_process(&s_pitch, hop, HOP, &conf);
+                if (pos < 8 * HOP) continue;                // Janela grave (80 ms) cheia
+                total++;
+                last = f;
+                if (f > 0 && conf >= 0.7f) {
+                    double m = 69 + 12 * log2(f / 440.0);
+                    if (lround(m) == midi) {
+                        ok++;
+                        cents += fabs(m - midi) * 100;
+                    }
+                }
+            }
+            if (ok < total * 9 / 10) {
+                failures++;
+                printf("  FALHA: %s, MIDI %d (%.1f Hz): %d de %d janelas corretas (ultima %.1f Hz)\n",
+                       pr->name, midi, f0, ok, total, last);
+            } else {
+                ok_notes++;
+            }
+            if (ok > 0 && cents / ok > worst_cents) worst_cents = cents / ok;
+            free(x);
+        }
+        printf("Perfil %-24s MIDI %3d a %3d: %d notas corretas\n", pr->name, pr->first_midi,
+               pr->last_midi, ok_notes);
+    }
+    printf("Pior erro medio de afinacao: %.1f cents\n", worst_cents);
+    if (worst_cents > 25.0) {
+        failures++;
+        printf("  FALHA: afinacao acima de 25 cents\n");
+    }
+    if (failures == 0) {
+        printf("\nALTURA: TODOS OS TESTES PASSARAM\n");
+        return 0;
+    }
+    printf("\nALTURA: %d verificacoes falharam\n", failures);
+    return 1;
+}

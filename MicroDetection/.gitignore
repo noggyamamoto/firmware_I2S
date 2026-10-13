@@ -16,3 +16,4 @@ dependencies.lock
 test/host/test_pipeline
 test/host/fake_device
 test/host/test_monitor
+test/host/test_pitch
