@@ -24,18 +24,30 @@ typedef struct {
     const char *name;
     float harmonics[8];
     int first_midi, last_midi;          // Faixa em que o perfil e realista
+    float speaker_hz;                   // > 0: alto-falante pequeno (corte nesta frequencia)
 } Profile;
 
 static const Profile PROFILES[] = {
     // Teclado/piano: harmonicos decrescentes
-    {"teclado", {1.0f, 0.5f, 0.33f, 0.25f, 0.2f, 0.17f, 0.14f, 0.12f}, 21, 108},
+    {"teclado", {1.0f, 0.5f, 0.33f, 0.25f, 0.2f, 0.17f, 0.14f, 0.12f}, 21, 108, 0},
     // Senoide pura (notas agudas do piano sao quase senoidais)
-    {"senoide", {1.0f, 0, 0, 0, 0, 0, 0, 0}, 21, 108},
+    {"senoide", {1.0f, 0, 0, 0, 0, 0, 0, 0}, 21, 108, 0},
     // Graves do piano: fundamental quase ausente
-    {"fundamental fraca", {0.05f, 0.6f, 1.0f, 0.7f, 0.4f, 0.3f, 0.2f, 0.1f}, 21, 93},
+    {"fundamental fraca", {0.05f, 0.6f, 1.0f, 0.7f, 0.4f, 0.3f, 0.2f, 0.1f}, 21, 93, 0},
     // Caso real do monitor serial: 4o harmonico dominante (E4 lido como E6)
-    {"4o harmonico dominante", {0.1f, 0.1f, 0.1f, 1.0f, 0.1f, 0.05f, 0.03f, 0.1f}, 21, 78},
+    {"4o harmonico dominante", {0.1f, 0.1f, 0.1f, 1.0f, 0.1f, 0.05f, 0.03f, 0.1f}, 21, 78, 0},
+    // Caso real (monitor serial): teclado/celular com alto-falante pequeno,
+    // que corta abaixo de ~1,2 kHz (E4 so com o 4o harmonico forte). Abaixo
+    // do A3 todos os harmonicos audiveis ficariam abaixo do corte.
+    {"alto-falante pequeno", {0}, 57, 96, 1200.0f},
 };
+
+/* Ganho de um alto-falante pequeno: passa-alta de 16a ordem + ressonancia. */
+static double speaker_gain(double f, double fc) {
+    double r = pow(f / fc, 16);
+    double bump = 1 + 1.5 * exp(-pow(log2(f / (fc * 1.15)), 2) / 0.05);
+    return sqrt(r / (1 + r)) * bump;
+}
 
 static PitchDetector s_pitch;
 
@@ -53,9 +65,12 @@ int main(void) {
             float *x = calloc(len, sizeof(float));
             for (size_t i = 0; i < len; i++) {
                 double t = (double)i / FS, s = 0;
-                for (int h = 1; h <= 8; h++) {
+                for (int h = 1; h <= 16; h++) {
                     double fh = f0 * h * sqrt(1 + B * h * h);
-                    if (fh < FS / 2 - 500) s += pr->harmonics[h - 1] * sin(2 * M_PI * fh * t + h);
+                    if (fh >= FS / 2 - 500) break;
+                    double a = pr->speaker_hz > 0 ? speaker_gain(fh, pr->speaker_hz) / (h * h)
+                                                  : (h <= 8 ? pr->harmonics[h - 1] : 0.0);
+                    s += a * sin(2 * M_PI * fh * t + h);
                 }
                 x[i] = (float)(0.05 * s * exp(-t / 1.2) + 2e-4 * (rand() / (double)RAND_MAX - 0.5));
             }

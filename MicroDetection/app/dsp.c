@@ -225,8 +225,9 @@ float yin_detect(YinDetector *y, const float *x, float *confidence) {
  * candidato era um harmônico e o período verdadeiro é o múltiplo.
  */
 #define MULTIPLE_RATIO      0.5f        // Múltiplo precisa ter d' < 50% do atual
-#define MULTIPLE_MARGIN     0.02f       // ...e ser menor em pelo menos 0,02 (sinais
-                                        // muito limpos têm d' ~0 em todos os múltiplos)
+#define MULTIPLE_MARGIN     0.005f      // ...e ser menor em pelo menos 0,005 (sinais
+                                        // muito limpos têm d' ~0 em todos os múltiplos;
+                                        // quem os separa é subharmonics_present)
 #define MULTIPLE_TOLERANCE  0.03f       // ±3% (inarmonicidade das cordas)
 #define MAX_STEP_MULTIPLE   8           // Harmônico mais alto corrigido por passo
 #define SUBHARMONIC_MIN_RATIO 0.003f    // Componentes do período maior >= -25 dB
@@ -327,41 +328,59 @@ static float window_power(const float *x, const float *hann, size_t n) {
 /*
  * Confirma que o período verdadeiro é `k` vezes o candidato: um sinal de
  * período P = k*T tem componentes em m/P com m coprimo de k (é isso que o
- * torna diferente de um sinal de período T ou de qualquer divisor de k*T). A inarmonicidade das
+ * torna diferente de um sinal de período T ou de qualquer divisor de k*T),
+ * abaixo ou acima do harmônico candidato. A inarmonicidade das
  * cordas não cria energia nessas frequências, então não engana o teste.
- * Graves (< ~900 Hz) são medidos na janela longa da faixa grave (melhor
- * resolução em frequência); os demais, na janela da faixa aguda.
  */
 static bool subharmonics_present(const PitchDetector *p, float period_s, int k) {
     const float f0 = 1.0f / period_s;
-    const bool use_low = f0 * (float)k < p->low.sample_rate * 0.225f;
+    // Notas graves: janela longa da faixa grave (resolução de 12,5 Hz, até
+    // ~900 Hz). As demais: janela da faixa aguda (31 Hz, até 7,2 kHz), que
+    // alcança as componentes acima do harmônico (5º, 7º... quando k = 4).
+    const bool use_low = f0 < 2.5f * p->high.sample_rate / (float)PITCH_HIGH_WINDOW;
     const float *x = use_low ? p->low_window : p->high_window;
     const float *hann = use_low ? p->low_hann : p->high_hann;
     const size_t n = use_low ? PITCH_LOW_WINDOW : PITCH_HIGH_WINDOW;
     const float fs = use_low ? p->low.sample_rate : p->high.sample_rate;
+    const float f_max = use_low ? fs * 0.225f : fs * 0.45f;
     const float total = window_power(x, hann, n);
     if (total <= 0.0f) return false;
-    float sub = 0.0f, ref = 0.0f;
-    int used = 0;
     // A referência de ruído só é confiável quando meio espaçamento entre as
     // componentes cabe em 2,5 bins (fora do lóbulo principal da janela)
     const bool check_peaks = 0.5f * f0 >= 2.5f * fs / (float)n;
-    for (int m = 1; m < k && used < 8; m++) {               // Até 8 componentes
-        // Só m coprimo de k: essas componentes existem somente se o período é
-        // exatamente k*T (com m = 2 e k = 8 o teste aceitaria 4*T, por exemplo)
+    float sub = 0.0f, ref = 0.0f;
+    int used = 0;
+    // m coprimo de k, abaixo E acima do harmônico candidato: um alto-falante
+    // pequeno corta a fundamental e os primeiros harmônicos (ex.: E4 com só o
+    // 4º harmônico forte), mas o 5º, o 7º... ainda revelam o período k*T
+    for (int m = 1; m <= 4 * k && used < 8; m++) {
         int a = m, b = k;
         while (b != 0) { int r = a % b; a = b; b = r; }
         if (a != 1) continue;
+        const float f = f0 * (float)m;
+        if (f >= f_max) break;
         used++;
-        float f = f0 * (float)m;
-        if (f >= fs * 0.45f) break;
         sub += tone_power(x, hann, n, f, fs);
         // Referência de ruído: entre as componentes (o ruído é plano; as
         // componentes de uma nota são picos)
         ref += tone_power(x, hann, n, f + 0.5f * f0, fs);
     }
-    return sub >= total * SUBHARMONIC_MIN_RATIO &&
+    return used > 0 && sub >= total * SUBHARMONIC_MIN_RATIO &&
            (!check_peaks || sub >= ref * SUBHARMONIC_PEAK_RATIO);
+}
+
+void pitch_harmonic_levels(const PitchDetector *p, float freq, float out_db[PITCH_PROBE_COUNT]) {
+    static const float ratios[PITCH_PROBE_COUNT] = {0.25f, 1.0f / 3.0f, 0.5f, 1.0f, 2.0f};
+    const float total = window_power(p->high_window, p->high_hann, PITCH_HIGH_WINDOW);
+    for (int i = 0; i < PITCH_PROBE_COUNT; i++) {
+        float f = freq * ratios[i];
+        float power = 0.0f;
+        if (freq > 0.0f && total > 0.0f && f < p->high.sample_rate * 0.45f) {
+            power = tone_power(p->high_window, p->high_hann, PITCH_HIGH_WINDOW, f,
+                               p->high.sample_rate) / total;
+        }
+        out_db[i] = power > 1e-12f ? 10.0f * log10f(power) : -120.0f;
+    }
 }
 
 float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confidence) {

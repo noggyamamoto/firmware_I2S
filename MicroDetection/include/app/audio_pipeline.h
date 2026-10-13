@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "dsp.h"
 #include "note_tracker.h"
 
 /** Situação do microfone, verificada continuamente pela tarefa de áudio. */
@@ -36,6 +37,9 @@ void audio_pipeline_mask_click(uint32_t click_ms, float click_hz);
 
 /** @brief Carga média de processamento por janela (µs), para diagnóstico. */
 uint32_t audio_pipeline_process_time_us(void);
+
+/** @brief Afinador: nível (dB) em f/4, f/3, f/2, f e 2f da última altura detectada. */
+void audio_pipeline_harmonic_levels(float out_db[PITCH_PROBE_COUNT]);
 
 /** @brief Vezes em que o relógio das amostras foi corrigido (amostras perdidas). */
 uint32_t audio_pipeline_clock_resyncs(void);

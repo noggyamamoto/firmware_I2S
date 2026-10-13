@@ -833,6 +833,15 @@ static void render_tuner(void) {
     line(ST_TEXT, "   Nivel     [%s] %.1f dBFS", meter, level);
     line(ST_SOFT, "   Piso de ruido %.1f dBFS - microfone: %s", app_state_noise_floor(),
          diagnostics_mic_text(audio_pipeline_mic_status()));
+    if (hz > 0) {
+        // Diagnóstico de oitava: energia abaixo da altura detectada. Se a nota
+        // tocada for f/2 ou f/4 e esses níveis forem muito baixos, o som que
+        // chega ao microfone quase não tem a nota (ex.: alto-falante pequeno)
+        float probe[PITCH_PROBE_COUNT];
+        audio_pipeline_harmonic_levels(probe);
+        line(ST_SOFT, "   Energia em f/4 %.0f dB | f/3 %.0f | f/2 %.0f | f %.0f | 2f %.0f",
+             probe[0], probe[1], probe[2], probe[3], probe[4]);
+    }
     blank();
     render_problems(1);
     render_footer("ESC volta");

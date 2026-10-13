@@ -115,6 +115,12 @@ void pitch_reset(PitchDetector *p);
  */
 float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confidence);
 
+/* Diagnóstico (afinador): nível relativo (dB) do sinal em f/4, f/3, f/2, f
+ * e 2f. Se a nota sai uma ou duas oitavas acima, mostra se havia energia
+ * na nota verdadeira (f/2, f/4) que o detector não aproveitou. */
+#define PITCH_PROBE_COUNT 5
+void pitch_harmonic_levels(const PitchDetector *p, float freq, float out_db[PITCH_PROBE_COUNT]);
+
 /** @brief Converte frequência para número MIDI (fracionário). */
 float dsp_hz_to_midi(float hz);
 
