@@ -42,8 +42,12 @@ void execution_monitor_set_bpm(uint16_t bpm);
 void execution_monitor_expected(uint16_t index, uint8_t midi, uint32_t onset_ms,
                                 uint32_t duration_ms, uint16_t beats_milli);
 
-/** @brief Nota captada pelo microfone (chamada pela tarefa de audio; nao bloqueia). */
-void execution_monitor_captured(const NoteEvent *ev);
+/**
+ * @brief Nota captada pelo microfone (chamada pela tarefa de audio; nao bloqueia).
+ * @param probe_half_quarter_db Energia (dB) em f/2 e f/4 da nota (diagnostico de
+ *        oitava) ou NULL.
+ */
+void execution_monitor_captured(const NoteEvent *ev, const float *probe_half_quarter_db);
 
 /**
  * @brief Linhas a imprimir ate o instante `session_ms` (relogio da sessao).

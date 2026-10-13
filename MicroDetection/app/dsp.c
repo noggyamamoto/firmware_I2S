@@ -232,6 +232,14 @@ float yin_detect(YinDetector *y, const float *x, float *confidence) {
 #define MAX_STEP_MULTIPLE   8           // Harmônico mais alto corrigido por passo
 #define SUBHARMONIC_MIN_RATIO 0.003f    // Componentes do período maior >= -25 dB
 #define SUBHARMONIC_PEAK_RATIO 3.0f     // ...e 3x acima do ruído entre elas
+#define WEAK_MIN_RATIO      3e-5f       // Componentes fracas: >= -45 dB do total...
+#define WEAK_SUM_RATIO      10.0f       // ...10x acima do ruído entre elas (soma)...
+#define WEAK_PEAK_RATIO     4.0f        // ...com pelo menos 2 picos >= 4x o ruído vizinho
+#define WEAK_VALUE_SLACK    0.02f       // d' no período maior até 0,02 pior
+#define WEAK_DOMINANT_RATIO 0.5f        // O harmônico candidato concentra >= 50% da energia
+#define WEAK_CENTER_RATIO   0.7f        // Pico centrado: >= 70% do máximo a ±1/2 bin
+                                        // (aceita ~1/2 bin de desvio; rejeita a encosta
+                                        // de uma componente a ~1 bin)
 
 void pitch_init(PitchDetector *p, float fs, float fmin, float fmax, float split_hz,
                 float threshold) {
@@ -332,24 +340,31 @@ static float window_power(const float *x, const float *hann, size_t n) {
  * abaixo ou acima do harmônico candidato. A inarmonicidade das
  * cordas não cria energia nessas frequências, então não engana o teste.
  */
-static bool subharmonics_present(const PitchDetector *p, float period_s, int k) {
+typedef enum {
+    SUBHARMONICS_NONE,                  // Sem as componentes do período maior
+    SUBHARMONICS_WEAK,                  // Fracas (até -45 dB), mas picos nítidos
+    SUBHARMONICS_STRONG,                // >= -25 dB e acima do ruído
+} SubharmonicEvidence;
+
+static SubharmonicEvidence subharmonics_present(const PitchDetector *p, float period_s, int k) {
     const float f0 = 1.0f / period_s;
-    // Notas graves: janela longa da faixa grave (resolução de 12,5 Hz, até
-    // ~900 Hz). As demais: janela da faixa aguda (31 Hz, até 7,2 kHz), que
-    // alcança as componentes acima do harmônico (5º, 7º... quando k = 4).
-    const bool use_low = f0 < 2.5f * p->high.sample_rate / (float)PITCH_HIGH_WINDOW;
+    // Notas graves (componentes a menos de 6 bins umas das outras na janela
+    // aguda): janela longa da faixa grave (resolução de 12,5 Hz, até ~900 Hz).
+    // As demais: janela da faixa aguda (31 Hz, até 7,2 kHz), que alcança as
+    // componentes acima do harmônico (5º, 7º... quando k = 4).
+    const bool use_low = f0 < 6.0f * p->high.sample_rate / (float)PITCH_HIGH_WINDOW;
     const float *x = use_low ? p->low_window : p->high_window;
     const float *hann = use_low ? p->low_hann : p->high_hann;
     const size_t n = use_low ? PITCH_LOW_WINDOW : PITCH_HIGH_WINDOW;
     const float fs = use_low ? p->low.sample_rate : p->high.sample_rate;
     const float f_max = use_low ? fs * 0.225f : fs * 0.45f;
     const float total = window_power(x, hann, n);
-    if (total <= 0.0f) return false;
+    if (total <= 0.0f) return SUBHARMONICS_NONE;
     // A referência de ruído só é confiável quando meio espaçamento entre as
     // componentes cabe em 2,5 bins (fora do lóbulo principal da janela)
     const bool check_peaks = 0.5f * f0 >= 2.5f * fs / (float)n;
     float sub = 0.0f, ref = 0.0f;
-    int used = 0;
+    int used = 0, peaks = 0;
     // m coprimo de k, abaixo E acima do harmônico candidato: um alto-falante
     // pequeno corta a fundamental e os primeiros harmônicos (ex.: E4 com só o
     // 4º harmônico forte), mas o 5º, o 7º... ainda revelam o período k*T
@@ -360,13 +375,38 @@ static bool subharmonics_present(const PitchDetector *p, float period_s, int k) 
         const float f = f0 * (float)m;
         if (f >= f_max) break;
         used++;
-        sub += tone_power(x, hann, n, f, fs);
+        const float comp = tone_power(x, hann, n, f, fs);
         // Referência de ruído: entre as componentes (o ruído é plano; as
         // componentes de uma nota são picos)
-        ref += tone_power(x, hann, n, f + 0.5f * f0, fs);
+        const float noise = 0.5f * (tone_power(x, hann, n, f + 0.5f * f0, fs) +
+                                    tone_power(x, hann, n, f - 0.5f * f0, fs));
+        sub += comp;
+        ref += noise;
+        if (comp >= noise * WEAK_PEAK_RATIO) {
+            // Pico centrado em f (componente da nota) e não a encosta de uma
+            // componente vizinha (ex.: cauda de outra nota a menos de 1 bin)
+            const float half_bin = 0.5f * fs / (float)n;
+            const float side = fmaxf(tone_power(x, hann, n, f - half_bin, fs),
+                                     tone_power(x, hann, n, f + half_bin, fs));
+            if (comp >= side * WEAK_CENTER_RATIO) peaks++;
+        }
     }
-    return used > 0 && sub >= total * SUBHARMONIC_MIN_RATIO &&
-           (!check_peaks || sub >= ref * SUBHARMONIC_PEAK_RATIO);
+    if (used == 0) return SUBHARMONICS_NONE;
+    if (sub >= total * SUBHARMONIC_MIN_RATIO && (!check_peaks || sub >= ref * SUBHARMONIC_PEAK_RATIO)) {
+        return SUBHARMONICS_STRONG;
+    }
+    // Componentes fracas (o som que chega ao microfone quase não tem a nota,
+    // ex.: E4 em que só o 4º harmônico chega forte), mas nítidas: picos bem
+    // acima do ruído vizinho em pelo menos duas frequências
+    // Só quando um único harmônico domina o som (>= 50% da energia): numa
+    // mistura de duas notas (ex.: transição G6 -> A6, razão 9/8) o
+    // "período comum" das duas não é uma nota
+    const float dominant = tone_power(x, hann, n, f0 * (float)k, fs);
+    if (check_peaks && dominant >= total * WEAK_DOMINANT_RATIO && sub >= total * WEAK_MIN_RATIO &&
+        sub >= ref * WEAK_SUM_RATIO && peaks >= 2) {
+        return SUBHARMONICS_WEAK;
+    }
+    return SUBHARMONICS_NONE;
 }
 
 void pitch_harmonic_levels(const PitchDetector *p, float freq, float out_db[PITCH_PROBE_COUNT]) {
@@ -426,8 +466,20 @@ float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confide
                 b = &p->low;
                 if (!band_value(&p->low, period_j * p->low.sample_rate, &value, &t)) continue;
             }
-            if (value < best_value * MULTIPLE_RATIO && best_value - value > MULTIPLE_MARGIN &&
-                value < band->threshold && subharmonics_present(p, period_j, j)) {
+            if (value >= band->threshold) continue;
+            // a) Múltiplo claramente mais periódico, com as componentes do
+            //    período maior presentes
+            // b) Componentes do período maior fracas mas nítidas (picos): o
+            //    d' quase não muda (as componentes têm pouca energia), então
+            //    basta que o período maior não seja menos periódico
+            bool clearly_better = value < best_value * MULTIPLE_RATIO &&
+                                  best_value - value > MULTIPLE_MARGIN;
+            bool not_worse = value <= best_value + WEAK_VALUE_SLACK;
+            SubharmonicEvidence ev = (clearly_better || not_worse)
+                                         ? subharmonics_present(p, period_j, j)
+                                         : SUBHARMONICS_NONE;
+            if ((clearly_better && ev != SUBHARMONICS_NONE) ||
+                (not_worse && ev == SUBHARMONICS_WEAK)) {
                 best_value = value;
                 band = b;
                 tau = t;

@@ -104,8 +104,9 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
         int n = note_tracker_process(&tr, t_ms, dsp_rms_db(hop, HOP), f, conf, ev);
         for (int k = 0; k < n && n_got < 64; k++) got[n_got++] = ev[k];
     }
-    NoteEvent last;
-    if (note_tracker_flush(&tr, (uint32_t)(total_s * 1000), &last)) got[n_got++] = last;
+    NoteEvent last[2];
+    int n_last = note_tracker_flush(&tr, (uint32_t)(total_s * 1000), last);
+    for (int k = 0; k < n_last && n_got < 64; k++) got[n_got++] = last[k];
 
     int ons = 0;
     for (int i = 0; i < n_got; i++) {
@@ -210,6 +211,23 @@ int main(void) {
         {64, 0.30, 0.70}, {64, 1.10, 0.70}, {65, 1.90, 0.70}, {67, 2.70, 0.70}, {67, 3.50, 0.70},
     };
     run_case("4o harmonico dominante (E4 nao vira E6)", strong4, 5, 4.4, -80.0, 0.05, NULL, 0, 0);
+    s_harmonics = KEYBOARD;
+
+    // Caso real (v1.3.1 na placa, "Hino a Alegria" a 85 BPM): C4 a G4 lidos
+    // duas oitavas acima. Praticamente so o 4o harmonico chegava ao
+    // microfone; as componentes da nota ficavam ~36 dB abaixo
+    static const double ISOLATED4[8] = {0.015, 0.015, 0.015, 1.0, 0.015, 0.01, 0.01, 0.01};
+    s_harmonics = ISOLATED4;
+    const double q = 60.0 / 85.0;                       // Seminima a 85 BPM
+    const int ode[12] = {64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64};
+    Expected joy[12];
+    for (int i = 0; i < 12; i++) {
+        joy[i].midi = ode[i];
+        joy[i].start = 0.3 + i * q;
+        joy[i].dur = q * 0.85;
+    }
+    run_case("hino a alegria so com o 4o harmonico (C4-G4 nao viram C6-G6)", joy, 12,
+             0.3 + 12 * q + 0.5, -80.0, 0.05, NULL, 0, 0);
     s_harmonics = KEYBOARD;
 
     if (failures == 0) {

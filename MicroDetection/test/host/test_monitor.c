@@ -66,15 +66,16 @@ int main(void) {
 
     poll_at(1000);
     NoteEvent ci = on(64, 2000, 329.6f);                    // Durante a contagem
-    execution_monitor_captured(&ci);
+    execution_monitor_captured(&ci, NULL);
     poll_at(2100);
     NoteEvent a = on(60, 4810, 261.7f), a2 = off(60, 5380, 570);
     NoteEvent b = on(64, 5420, 329.6f), b2 = off(64, 5690, 270);
-    execution_monitor_captured(&a);
+    const float probe[2] = {-72.0f, -80.0f};
+    execution_monitor_captured(&a, probe);
     poll_at(4900);
-    execution_monitor_captured(&a2);
-    execution_monitor_captured(&b);
-    execution_monitor_captured(&b2);
+    execution_monitor_captured(&a2, NULL);
+    execution_monitor_captured(&b, NULL);
+    execution_monitor_captured(&b2, NULL);
     poll_at(6000);
     execution_monitor_session_stop();
     poll_at(6000);
@@ -85,6 +86,7 @@ int main(void) {
     int exp0 = find("ESPERADO #0   C4   seminima");
     CHECK(music >= 0 && exp0 > music, "musica iniciada antes da primeira esperada");
     CHECK(find("esperado #0 C4: altura OK, tempo +10 ms") >= 0, "C4 no tempo");
+    CHECK(find("[f/2 -72 dB, f/4 -80 dB]") >= 0, "diagnostico de oitava na linha CAPTADO");
     CHECK(find("ESPERADO #1   D4   colcheia") >= 0, "D4 colcheia");
     CHECK(find("esperado #1 D4: altura ERRADA") >= 0, "E4 no lugar do D4");
     CHECK(find("ESPERADO #2   B6   fusa") >= 0, "B6 fusa");

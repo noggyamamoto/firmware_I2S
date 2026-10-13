@@ -53,6 +53,7 @@ static portMUX_TYPE   s_recent_lock = portMUX_INITIALIZER_UNLOCKED;
 #define MIC_CHECK_HOPS      62                      // ~1 s de observação
 #define MIC_READ_FAILS      5                       // Leituras falhas seguidas = erro de I2S
 #define CLIP_LEVEL          (0.999f * INPUT_GAIN)   // Próximo do fundo de escala de 24 bits
+#define RATE_TOLERANCE      0.10f                   // Taxa medida > 10% fora: corrige alturas
 
 bool audio_pipeline_init(void) {
     if (!hal_audio_init(HOP_SAMPLES)) {
@@ -99,6 +100,18 @@ void audio_pipeline_mask_click(uint32_t click_ms, float click_hz) {
 
 uint32_t audio_pipeline_process_time_us(void) { return s_process_us; }
 uint32_t audio_pipeline_clock_resyncs(void) { return hal_audio_resync_count(); }
+
+float audio_pipeline_rate_scale(void) {
+    const float measured = hal_audio_measured_rate();
+    if (measured <= 0.0f) return 1.0f;
+    const float scale = measured / (float)SAMPLE_RATE;
+    const bool processing_ok = s_process_us < (uint32_t)(HOP_SAMPLES * 1000000u / SAMPLE_RATE / 2);
+    return (fabsf(scale - 1.0f) > RATE_TOLERANCE && processing_ok) ? scale : 1.0f;
+}
+
+float audio_pipeline_measured_rate(void) {
+    return hal_audio_measured_rate();
+}
 
 void audio_pipeline_harmonic_levels(float out_db[PITCH_PROBE_COUNT]) {
     portENTER_CRITICAL(&s_probe_lock);
@@ -154,7 +167,14 @@ static void publish_note(const NoteEvent *ev, bool local) {
     out.u.note = *ev;
     if (!local) {
         app_state_post(&out);
-        execution_monitor_captured(ev);         // Monitor serial (só registra)
+        // Monitor serial (só registra), com a energia em f/2 e f/4 medida no
+        // trecho mais recente (diagnóstico de oitava)
+        float probe[PITCH_PROBE_COUNT];
+        portENTER_CRITICAL(&s_probe_lock);
+        memcpy(probe, s_probe_db, sizeof(probe));
+        portEXIT_CRITICAL(&s_probe_lock);
+        const float half_quarter[2] = {probe[2], probe[0]};
+        execution_monitor_captured(ev, ev->type == NOTE_EVENT_ON ? half_quarter : NULL);
     }
 
     portENTER_CRITICAL(&s_recent_lock);
@@ -208,11 +228,17 @@ static void audio_task(void *arg) {
         float hop_db = dsp_rms_db(s_hop, HOP_SAMPLES);
         float confidence = 0.0f;
         float freq = pitch_process(&s_pitch, s_hop, HOP_SAMPLES, &confidence);
+        // Taxa real do I2S diferente da configurada (> 10%) com folga de
+        // processamento (não são amostras perdidas): corrige a escala das
+        // alturas, que seriam todas deslocadas na mesma proporção
+        const float window_freq = freq;                 // Na escala da janela (sonda)
+        const float scale = audio_pipeline_rate_scale();
+        if (freq > 0.0f && scale != 1.0f) freq *= scale;
         s_level_db = hop_db;
         s_last_pitch = freq;
         if (freq > 0.0f) {
             float probe[PITCH_PROBE_COUNT];
-            pitch_harmonic_levels(&s_pitch, freq, probe);
+            pitch_harmonic_levels(&s_pitch, window_freq, probe);
             portENTER_CRITICAL(&s_probe_lock);
             memcpy(s_probe_db, probe, sizeof(probe));
             portEXIT_CRITICAL(&s_probe_lock);
@@ -222,9 +248,10 @@ static void audio_task(void *arg) {
         SessionInfo session = app_state_session();
         if (session.generation != generation) {
             if (was_active) {
-                NoteEvent off;
+                NoteEvent off[2];
                 uint32_t now_ms = (uint32_t)((hop_start_us - session.t0_us) / 1000);
-                if (note_tracker_flush(&s_tracker, now_ms, &off)) publish_note(&off, true);
+                int k = note_tracker_flush(&s_tracker, now_ms, off);
+                for (int i = 0; i < k; i++) publish_note(&off[i], true);
             }
             note_tracker_reset(&s_tracker);             // Mantém o piso de ruído aprendido
             generation = session.generation;
