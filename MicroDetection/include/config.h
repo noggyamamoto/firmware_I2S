@@ -22,7 +22,7 @@
 
 #include "sdkconfig.h"
 
-#define FIRMWARE_VERSION        "1.1.0"                 // Versão enviada no ANNOUNCE
+#define FIRMWARE_VERSION        "1.2.0"                 // Versão enviada no ANNOUNCE
 #define DEVICE_NAME_PREFIX      "PartituraIoT"          // Prefixo do nome do dispositivo
 
 // ======================= PINOS ==============================================
