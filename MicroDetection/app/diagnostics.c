@@ -176,6 +176,16 @@ static int mic_problem(DiagProblem *p) {
         add_action(p, "Confira os fios SCK/WS do INMP441 e a placa escolhida no PlatformIO.");
         return 1;
     }
+    // Janela processada em mais tempo do que dura: as notas atrasam e o
+    // atraso cresce enquanto se toca (o DMA guarda ~96 ms)
+    const uint32_t hop_us = HOP_SAMPLES * 1000000u / SAMPLE_RATE;
+    if (audio_pipeline_process_time_us() > hop_us * 3 / 4) {
+        set_title(p, UI_EV_WARN, "Processamento de audio no limite (%u us de %u us por janela)",
+                  (unsigned)audio_pipeline_process_time_us(), (unsigned)hop_us);
+        add_action(p, "As notas podem chegar ao app com atraso.");
+        add_action(p, "Confira no PlatformIO a CPU a 240 MHz e a compilacao com -O2.");
+        return 1;
+    }
     switch (audio_pipeline_mic_status()) {
         case MIC_STATUS_NO_SIGNAL:
             set_title(p, UI_EV_ERROR, "Microfone sem sinal: nenhuma nota sera detectada");
