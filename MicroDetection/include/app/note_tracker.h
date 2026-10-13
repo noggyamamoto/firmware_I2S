@@ -33,6 +33,7 @@ typedef struct {
     int      release_hops;          // Janelas abaixo do limiar para soltar
     uint32_t quantize_ms;           // Grade de quantização temporal
     int      settle_hops;           // Trechos com o NOTE_ON retido para confirmar a oitava
+                                    // (somente com dúvida de oitava no ataque)
     int      min_midi;              // Menor nota aceita (A0 = 21); abaixo é ignorada
     int      max_midi;              // Maior nota aceita
 } NoteTrackerConfig;
@@ -76,6 +77,8 @@ typedef struct {
     float    cand_conf_sum;
     float    cand_peak_db;
     bool     cand_over_active;      // Candidato surgiu sobre uma nota ativa (reataque)
+    bool     cand_doubt;            // Dúvida de oitava em algum trecho do candidato
+    bool     doubt_now;             // Dúvida de oitava no trecho atual (set_octave_doubt)
 
     // Nota ativa
     int      active_midi;
@@ -119,6 +122,14 @@ void note_tracker_mask_until(NoteTracker *t, uint32_t until_ms, float click_hz);
  *        (trechos anteriores ao clique continuam com a altura normal).
  */
 void note_tracker_mask(NoteTracker *t, uint32_t from_ms, uint32_t until_ms, float click_hz);
+
+/**
+ * @brief Informa a dúvida de oitava do detector no trecho que será processado
+ *        a seguir (pitch_octave_doubt). Vale para uma chamada de
+ *        note_tracker_process. Sem dúvida no ataque, o NOTE_ON sai na hora; com
+ *        dúvida, fica retido até `settle_hops` trechos para confirmar a oitava.
+ */
+void note_tracker_set_octave_doubt(NoteTracker *t, bool doubt);
 
 /**
  * @brief Processa uma janela de análise.

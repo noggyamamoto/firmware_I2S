@@ -37,6 +37,11 @@ static bool            s_mask_pending = false;
 static float           s_probe_db[PITCH_PROBE_COUNT];   // Afinador: f/4, f/3, f/2, f, 2f
 static portMUX_TYPE    s_probe_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t  s_process_us = 0;
+static volatile uint32_t  s_process_peak_us = 0;   // Pior janela desde o início da sessão
+// Atraso de detecção (ataque -> NOTE_ON pronto para envio) na sessão atual
+static volatile uint32_t  s_detect_avg_ms = 0;
+static volatile uint32_t  s_detect_max_ms = 0;
+static uint32_t           s_hop_end_ms = 0;         // Fim do trecho em processamento
 static volatile float     s_level_db = -120.0f;
 static volatile float     s_last_pitch = 0.0f;
 static volatile MicStatus s_mic_status = MIC_STATUS_STARTING;
@@ -99,6 +104,11 @@ void audio_pipeline_mask_click(uint32_t click_ms, float click_hz) {
 }
 
 uint32_t audio_pipeline_process_time_us(void) { return s_process_us; }
+uint32_t audio_pipeline_process_peak_us(void) { return s_process_peak_us; }
+uint32_t audio_pipeline_detect_delay_ms(uint32_t *worst_ms) {
+    if (worst_ms) *worst_ms = s_detect_max_ms;
+    return s_detect_avg_ms;
+}
 uint32_t audio_pipeline_clock_resyncs(void) { return hal_audio_resync_count(); }
 
 float audio_pipeline_rate_scale(void) {
@@ -159,6 +169,11 @@ static void check_microphone(const float *x, size_t n) {
 
 /* Publica um evento de nota na fila de saída e no terminal serial. */
 static void publish_note(const NoteEvent *ev, bool local) {
+    if (ev->type == NOTE_EVENT_ON && s_hop_end_ms >= ev->time_ms) {
+        uint32_t delay = s_hop_end_ms - ev->time_ms;
+        s_detect_avg_ms = s_detect_avg_ms ? (s_detect_avg_ms * 7 + delay) / 8 : delay;
+        if (delay > s_detect_max_ms) s_detect_max_ms = delay;
+    }
     OutEvent out = {
         .type = OUT_NOTE,
         .has_dest = false,
@@ -254,6 +269,9 @@ static void audio_task(void *arg) {
                 for (int i = 0; i < k; i++) publish_note(&off[i], true);
             }
             note_tracker_reset(&s_tracker);             // Mantém o piso de ruído aprendido
+            s_process_peak_us = 0;                      // Diagnóstico da nova sessão
+            s_detect_avg_ms = 0;
+            s_detect_max_ms = 0;
             generation = session.generation;
             frame_fill = 0;                             // Descarta o quadro incompleto
             frame = NULL;
@@ -262,6 +280,7 @@ static void audio_task(void *arg) {
 
         int64_t rel_us = hop_start_us - session.t0_us;
         uint32_t hop_ms = rel_us > 0 ? (uint32_t)(rel_us / 1000) : 0;
+        s_hop_end_ms = hop_ms + HOP_SAMPLES * 1000 / SAMPLE_RATE;
 
         // Máscara do clique do metrônomo
         portENTER_CRITICAL(&s_mask_lock);
@@ -275,6 +294,7 @@ static void audio_task(void *arg) {
 
         // 5) Segmentação em notas (somente trechos após o início da sessão)
         NoteEvent events[2];
+        note_tracker_set_octave_doubt(&s_tracker, pitch_octave_doubt(&s_pitch));
         int n = note_tracker_process(&s_tracker, hop_ms, hop_db, freq, confidence, events);
         app_state_set_noise_floor(s_tracker.noise_floor_db);
         if (session.active && rel_us >= 0) {
@@ -328,6 +348,7 @@ static void audio_task(void *arg) {
         // Tempo de processamento por janela (RNFE01: deve ficar bem abaixo de 16 ms)
         uint32_t spent = (uint32_t)(hal_time_us() - t_begin);
         s_process_us = (s_process_us * 7 + spent) / 8;
+        if (spent > s_process_peak_us) s_process_peak_us = spent;
 
         // Garantia para o watchdog: se o processamento ficar perto do tempo de
         // uma janela, a leitura nunca bloqueia e a tarefa ociosa do núcleo 1

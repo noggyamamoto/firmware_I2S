@@ -45,8 +45,12 @@ void note_tracker_reset(NoteTracker *t) {
     t->stable_midi = -1;
     t->change_midi = -1;
     t->cand_over_active = false;
+    t->cand_doubt = false;
+    t->doubt_now = false;
     t->prev_db = -120.0f;
 }
+
+void note_tracker_set_octave_doubt(NoteTracker *t, bool doubt) { t->doubt_now = doubt; }
 
 void note_tracker_mask_until(NoteTracker *t, uint32_t until_ms, float click_hz) {
     if (until_ms > t->mask_until_ms) t->mask_until_ms = until_ms;
@@ -101,6 +105,7 @@ static void start_candidate(NoteTracker *t, uint32_t time_ms, float db, bool ove
     t->cand_conf_sum = 0.0f;
     t->cand_peak_db = db;
     t->cand_over_active = over_active;
+    t->cand_doubt = false;
 }
 
 /* Acumula a altura observada na confirmação do candidato. */
@@ -140,21 +145,23 @@ static void make_on(NoteTracker *t, NoteEvent *e, int midi, uint32_t time_ms,
 }
 
 /*
- * Início de nota com confirmação de oitava: o NOTE_ON fica retido por
- * `settle_hops` trechos. Nos primeiros trechos a janela ainda está meio
- * vazia e um harmônico forte pode ser lido no lugar da nota (ex.: E6 no
- * lugar de E4 quando o som tem quase só o 4º harmônico); se nesse intervalo
- * as leituras mostrarem um submúltiplo exato estável, a nota sai com a
- * altura corrigida. O instante do ataque não muda.
+ * Início de nota com confirmação de oitava. Nos primeiros trechos a janela
+ * ainda está meio vazia e um harmônico forte pode ser lido no lugar da nota
+ * (ex.: E6 no lugar de E4 quando o som tem quase só o 4º harmônico). Se o
+ * detector teve dúvida de oitava no ataque (havia energia uma oitava abaixo,
+ * sem evidência suficiente), o NOTE_ON fica retido por `settle_hops`
+ * trechos; se as leituras seguintes mostrarem um submúltiplo exato estável,
+ * a nota sai com a altura corrigida. Sem dúvida, sai na hora: reter toda
+ * nota atrasava o feedback no app em ~48 ms. O instante do ataque não muda.
  * Retorna quantos eventos escreveu em `out` (0 ou 1).
  */
 static int begin_note(NoteTracker *t, NoteEvent *out, int midi, uint32_t time_ms,
-                      float freq, float level_db, float conf) {
+                      float freq, float level_db, float conf, bool doubt) {
     make_on(t, &t->pending_on, midi, time_ms, freq, level_db, conf);
     t->sub_midi = -1;
     t->sub_count = 0;
     t->sub_freq_sum = 0.0f;
-    if (t->cfg.settle_hops <= 0) {
+    if (t->cfg.settle_hops <= 0 || !doubt) {
         *out = t->pending_on;
         return 1;
     }
@@ -231,6 +238,9 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
     if (!voiced) midi_now = -1;
     const float jump = hop_db - t->prev_db;
 
+    const bool doubt = t->doubt_now;
+    t->doubt_now = false;                               // Vale só para este trecho
+
     // Durante o clique do metrônomo, a altura do próprio clique é ignorada
     if (masked && voiced && t->mask_pitch_class >= 0 && midi_now % 12 == t->mask_pitch_class) {
         voiced = false;
@@ -246,6 +256,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
             if (hop_db >= note_tracker_gate_db(t)) {
                 start_candidate(t, hop_start_ms, hop_db, false);
                 if (voiced) candidate_add_pitch(t, midi_now, freq_hz, confidence);
+                t->cand_doubt = voiced && doubt;
             }
             break;
 
@@ -280,6 +291,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
             if (hop_db > t->cand_peak_db) t->cand_peak_db = hop_db;
             if (voiced) {
                 candidate_add_pitch(t, midi_now, freq_hz, confidence);
+                if (doubt) t->cand_doubt = true;
             } else if (!t->cand_over_active && !pitched && !masked) {
                 update_noise_floor(t, hop_db, false);   // Ruído sem altura: ajusta o limiar
             }
@@ -291,7 +303,8 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                     make_off(t, &out[n++], t->cand_time_ms);   // Encerra a nota anterior
                 }
                 n += begin_note(t, &out[n], t->stable_midi, t->cand_time_ms,
-                                t->cand_freq_sum / cnt, t->cand_peak_db, t->cand_conf_sum / cnt);
+                                t->cand_freq_sum / cnt, t->cand_peak_db, t->cand_conf_sum / cnt,
+                                t->cand_doubt);
             } else if (t->cand_hops >= t->cfg.onset_timeout_hops) {
                 abort_candidate(t);                     // Som sem altura definida
             }
@@ -304,6 +317,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                 n += emit_pending(t, &out[n]);          // A nota que soa já é definitiva
                 start_candidate(t, hop_start_ms, hop_db, true);
                 if (voiced) candidate_add_pitch(t, midi_now, freq_hz, confidence);
+                t->cand_doubt = voiced && doubt;
                 break;
             }
 
@@ -368,7 +382,7 @@ int note_tracker_process(NoteTracker *t, uint32_t hop_start_ms, float hop_db,
                     uint32_t at = t->change_start_ms;
                     int new_midi = t->change_midi;
                     make_off(t, &out[n++], at);
-                    n += begin_note(t, &out[n], new_midi, at, freq_hz, hop_db, confidence);
+                    n += begin_note(t, &out[n], new_midi, at, freq_hz, hop_db, confidence, doubt);
                 }
             } else if (voiced) {
                 t->change_count = 0;

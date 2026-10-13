@@ -681,8 +681,13 @@ static void render_status(void) {
          app_state_audio_buffer()->overruns);
     line(ST_TEXT, " Nivel de entrada:   %.1f dBFS (piso de ruido %.1f dBFS)",
          audio_pipeline_level_db(), app_state_noise_floor());
-    line(ST_TEXT, " Processamento:      %" PRIu32 " us por janela de %d ms",
-         audio_pipeline_process_time_us(), HOP_SAMPLES * 1000 / SAMPLE_RATE);
+    line(ST_TEXT, " Processamento:      %" PRIu32 " us por janela de %d ms (pior: %" PRIu32 " us)",
+         audio_pipeline_process_time_us(), HOP_SAMPLES * 1000 / SAMPLE_RATE,
+         audio_pipeline_process_peak_us());
+    uint32_t detect_worst = 0;
+    uint32_t detect_avg = audio_pipeline_detect_delay_ms(&detect_worst);
+    line(ST_TEXT, " Atraso de deteccao: %" PRIu32 " ms (pior: %" PRIu32 " ms) do ataque ao envio",
+         detect_avg, detect_worst);
     line(ST_TEXT, " Relogio do audio:   %" PRIu32 " correcoes (amostras perdidas)",
          audio_pipeline_clock_resyncs());
     line(ST_TEXT, " Taxa do microfone:  %.0f amostras/s medidas (configurada: %d)",

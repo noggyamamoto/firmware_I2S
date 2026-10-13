@@ -38,6 +38,15 @@ void audio_pipeline_mask_click(uint32_t click_ms, float click_hz);
 /** @brief Carga média de processamento por janela (µs), para diagnóstico. */
 uint32_t audio_pipeline_process_time_us(void);
 
+/** @brief Pior tempo de processamento de uma janela (µs) desde o início da sessão. */
+uint32_t audio_pipeline_process_peak_us(void);
+
+/**
+ * @brief Atraso de detecção na sessão atual: do ataque da nota até o NOTE_ON
+ *        ficar pronto para envio (ms, média móvel). `worst_ms` recebe o pior.
+ */
+uint32_t audio_pipeline_detect_delay_ms(uint32_t *worst_ms);
+
 /** @brief Taxa de amostragem medida do microfone (amostras/s; 0 no início). */
 float audio_pipeline_measured_rate(void);
 

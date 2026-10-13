@@ -10,6 +10,7 @@
  * ============================================================================
  */
 #include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,12 @@
 typedef struct { int midi; double start; double dur; } Expected;
 
 static int failures = 0;
+
+// Latência do NOTE_ON: do ataque real até o fim do trecho em que o evento
+// é gerado (quando o dispositivo pode enviá-lo ao app)
+static double s_lat_sum = 0, s_lat_max = 0;
+static int s_lat_count = 0;
+static double s_case_lat_max = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("  FALHA: " __VA_ARGS__); printf("\n"); } } while (0)
 
 /* Ruído branco gaussiano simples (Box-Muller). */
@@ -86,7 +93,9 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
     note_tracker_init(&tr, &cfg);
 
     NoteEvent got[64];
+    uint32_t emitted_ms[64];
     int n_got = 0;
+    s_case_lat_max = 0;
     int ci = 0;
     for (size_t pos = 0; pos + HOP <= len; pos += HOP) {
         float hop[HOP];
@@ -101,12 +110,19 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
         float conf = 0;
         float f = pitch_process(&pitch, hop, HOP, &conf);
         NoteEvent ev[2];
+        note_tracker_set_octave_doubt(&tr, pitch_octave_doubt(&pitch));
         int n = note_tracker_process(&tr, t_ms, dsp_rms_db(hop, HOP), f, conf, ev);
-        for (int k = 0; k < n && n_got < 64; k++) got[n_got++] = ev[k];
+        for (int k = 0; k < n && n_got < 64; k++) {
+            emitted_ms[n_got] = t_ms + HOP * 1000 / FS;
+            got[n_got++] = ev[k];
+        }
     }
     NoteEvent last[2];
     int n_last = note_tracker_flush(&tr, (uint32_t)(total_s * 1000), last);
-    for (int k = 0; k < n_last && n_got < 64; k++) got[n_got++] = last[k];
+    for (int k = 0; k < n_last && n_got < 64; k++) {
+        emitted_ms[n_got] = (uint32_t)(total_s * 1000);
+        got[n_got++] = last[k];
+    }
 
     int ons = 0;
     for (int i = 0; i < n_got; i++) {
@@ -128,6 +144,11 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
         if (got[i].type != NOTE_EVENT_ON) continue;
         const Expected *x = &exp_notes[idx++];
         double dt = (double)got[i].time_ms - x->start * 1000.0;
+        double lat = (double)emitted_ms[i] - x->start * 1000.0;
+        s_lat_sum += lat;
+        s_lat_count++;
+        if (lat > s_lat_max) s_lat_max = lat;
+        if (lat > s_case_lat_max) s_case_lat_max = lat;
         CHECK(got[i].midi == x->midi, "nota %d: esperado MIDI %d, obtido %d", idx, x->midi, got[i].midi);
         CHECK(fabs(dt) <= 30.0, "nota %d: erro de ataque %.0f ms", idx, dt);
         // Procura o NOTE_OFF correspondente
@@ -139,6 +160,7 @@ static int run_case_ex(const char *name, const Expected *played, int n_played,
             }
         }
     }
+    printf("  latencia do NOTE_ON: pior %.0f ms\n", s_case_lat_max);
     free(sig);
     return 0;
 }
@@ -149,8 +171,46 @@ static int run_case(const char *name, const Expected *exp_notes, int n_exp, doub
                        n_clicks, check_dur);
 }
 
+/*
+ * NOTE_ON retido só com dúvida de oitava: sem dúvida, sai no trecho em que a
+ * altura se confirma; com dúvida, `settle_hops` trechos depois (e corrigido
+ * se as leituras descerem uma oitava estável nesse intervalo).
+ */
+static int on_hop(bool doubt, float second_freq) {
+    NoteTrackerConfig cfg;
+    note_tracker_default_config(&cfg);
+    NoteTracker tr;
+    note_tracker_init(&tr, &cfg);
+    for (int h = 0; h < 20; h++) {
+        uint32_t t = (uint32_t)(h * 16);
+        float db = h < 3 ? -80.0f : -25.0f;
+        float f = h < 3 ? 0.0f : (h < 6 ? 1568.0f : second_freq);
+        NoteEvent ev[2];
+        note_tracker_set_octave_doubt(&tr, doubt && h >= 3);
+        int n = note_tracker_process(&tr, t, db, f, f > 0 ? 0.95f : 0.0f, ev);
+        for (int i = 0; i < n; i++) {
+            if (ev[i].type == NOTE_EVENT_ON) return h * 1000 + ev[i].midi;
+        }
+    }
+    return -1;
+}
+
+static void test_settle_on_doubt(void) {
+    printf("Caso: NOTE_ON retido somente com duvida de oitava\n");
+    int clear = on_hop(false, 1568.0f);
+    int doubt = on_hop(true, 1568.0f);
+    int fixed = on_hop(true, 392.0f);
+    printf("  sem duvida: trecho %d (MIDI %d); com duvida: trecho %d; corrigido: MIDI %d\n",
+           clear / 1000, clear % 1000, doubt / 1000, fixed % 1000);
+    CHECK(clear / 1000 == 4 && clear % 1000 == 91, "sem duvida a nota sai na confirmacao (trecho 4)");
+    CHECK(doubt / 1000 == 4 + 3 && doubt % 1000 == 91, "com duvida a nota espera 3 trechos");
+    CHECK(fixed % 1000 == 67, "com duvida e leituras uma oitava abaixo estaveis, sai G4 (67)");
+}
+
 int main(void) {
     srand(42);
+
+    test_settle_on_doubt();
 
     // Melodia simples com nota repetida (Mi-Mi) e saltos, do grave ao agudo
     const Expected melody[] = {
@@ -158,6 +218,9 @@ int main(void) {
         {67, 2.50, 0.90}, {72, 3.60, 0.30}, {57, 4.10, 0.60}, {48, 5.00, 0.80},
     };
     run_case("melodia em sala silenciosa", melody, 8, 6.2, -80.0, 0.05, NULL, 0, 1);
+    // Feedback no app: nota de teclado sem dúvida de oitava sai sem esperar
+    // a confirmação da oitava (antes, toda nota esperava mais 48 ms)
+    CHECK(s_case_lat_max <= 60.0, "latencia do NOTE_ON %.0f ms (maximo 60 ms)", s_case_lat_max);
 
     // Mesma melodia com ruído de sala (≈ 20 pessoas conversando baixo)
     run_case("melodia com ruido de sala", melody, 8, 6.2, -55.0, 0.05, NULL, 0, 1);
@@ -229,6 +292,13 @@ int main(void) {
     run_case("hino a alegria so com o 4o harmonico (C4-G4 nao viram C6-G6)", joy, 12,
              0.3 + 12 * q + 0.5, -80.0, 0.05, NULL, 0, 0);
     s_harmonics = KEYBOARD;
+
+    printf("\nLatencia do NOTE_ON (ataque -> evento pronto): media %.0f ms, pior %.0f ms (%d notas)\n",
+           s_lat_sum / s_lat_count, s_lat_max, s_lat_count);
+    // Antes desta versão: media 97 ms, pior 152 ms
+    CHECK(s_lat_sum / s_lat_count <= 70.0, "latencia media %.0f ms (maximo 70 ms)",
+          s_lat_sum / s_lat_count);
+    CHECK(s_lat_max <= 130.0, "pior latencia %.0f ms (maximo 130 ms)", s_lat_max);
 
     if (failures == 0) {
         printf("\nTODOS OS TESTES PASSARAM\n");

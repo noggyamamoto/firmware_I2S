@@ -95,6 +95,15 @@ typedef struct {
     float       low_diff[PITCH_LOW_WINDOW / 2 + 1];
     float       high_hann[PITCH_HIGH_WINDOW];           // Janelas de Hann (Goertzel)
     float       low_hann[PITCH_LOW_WINDOW];
+    // Janela atual já multiplicada pela de Hann e sua potência, calculadas
+    // uma vez por trecho (a correção de oitava faz dezenas de Goertzel)
+    float       high_windowed[PITCH_HIGH_WINDOW];
+    float       low_windowed[PITCH_LOW_WINDOW];
+    float       high_power;
+    float       low_power;
+    // Último trecho: um período maior (oitava abaixo) tinha componentes no
+    // sinal, mas não o bastante para corrigir a nota (pitch_octave_doubt)
+    bool        octave_doubt;
 } PitchDetector;
 
 /**
@@ -120,6 +129,20 @@ float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confide
  * na nota verdadeira (f/2, f/4) que o detector não aproveitou. */
 #define PITCH_PROBE_COUNT 5
 void pitch_harmonic_levels(const PitchDetector *p, float freq, float out_db[PITCH_PROBE_COUNT]);
+
+/**
+ * @brief Iterações acumuladas dos laços internos do detector (YIN e
+ *        Goertzel). A diferença entre duas leituras é o custo de um trecho,
+ *        independente da máquina (testes de desempenho).
+ */
+uint32_t pitch_work_counter(void);
+
+/**
+ * @brief Dúvida de oitava no último trecho: alguma oitava abaixo da altura
+ *        devolvida tinha componentes no sinal, sem evidência suficiente para
+ *        corrigir a nota. Sem dúvida, a nota pode ser anunciada na hora.
+ */
+bool pitch_octave_doubt(const PitchDetector *p);
 
 /** @brief Converte frequência para número MIDI (fracionário). */
 float dsp_hz_to_midi(float hz);

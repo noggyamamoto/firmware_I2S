@@ -106,10 +106,17 @@ void yin_init(YinDetector *y, float fs, size_t window, float fmin, float fmax,
 }
 
 /* Passos 1 e 2: d'(tau) em y->diff[0..tau_max]. */
+// Iterações dos laços internos (YIN e Goertzel) desde o início: custo do
+// detector independente da máquina (testes de desempenho no computador).
+static uint32_t s_work = 0;
+
+uint32_t pitch_work_counter(void) { return s_work; }
+
 static void yin_cmndf(YinDetector *y, const float *x) {
     const size_t tau_max = y->tau_max;
     const size_t w = y->window - tau_max;           // Janela de integração
     float *d = y->diff;
+    s_work += (uint32_t)(tau_max * w);
 
     d[0] = 0.0f;
     for (size_t tau = 1; tau <= tau_max; tau++) {
@@ -232,6 +239,8 @@ float yin_detect(YinDetector *y, const float *x, float *confidence) {
 #define MAX_STEP_MULTIPLE   8           // Harmônico mais alto corrigido por passo
 #define SUBHARMONIC_MIN_RATIO 0.003f    // Componentes do período maior >= -25 dB
 #define SUBHARMONIC_PEAK_RATIO 3.0f     // ...e 3x acima do ruído entre elas
+#define DOUBT_SUM_RATIO     3.0f        // Dúvida de oitava: componentes 3x acima do ruído
+#define PURE_TONE_RATIO     0.01f       // ...ou 2º harmônico 20 dB abaixo (quase senoide)
 #define WEAK_MIN_RATIO      3e-5f       // Componentes fracas: >= -45 dB do total...
 #define WEAK_SUM_RATIO      10.0f       // ...10x acima do ruído entre elas (soma)...
 #define WEAK_PEAK_RATIO     4.0f        // ...com pelo menos 2 picos >= 4x o ruído vizinho
@@ -309,12 +318,14 @@ static bool band_value(const YinDetector *y, float t, float *value, size_t *tau)
 
 /* Potência média (A²/2) da componente em `freq` (Goertzel com janela de
  * Hann, `hann` com n pontos). */
-static float tone_power(const float *x, const float *hann, size_t n, float freq, float fs) {
+/* `xw`: trecho já multiplicado pela janela de Hann (window_signal). */
+static float tone_power(const float *xw, size_t n, float freq, float fs) {
     const float w = 2.0f * (float)M_PI * freq / fs;
     const float coeff = 2.0f * cosf(w);
     float s1 = 0.0f, s2 = 0.0f;
+    s_work += (uint32_t)n;
     for (size_t i = 0; i < n; i++) {
-        float s0 = x[i] * hann[i] + coeff * s1 - s2;
+        float s0 = xw[i] + coeff * s1 - s2;
         s2 = s1;
         s1 = s0;
     }
@@ -323,10 +334,12 @@ static float tone_power(const float *x, const float *hann, size_t n, float freq,
     return mag2 * 8.0f / ((float)n * (float)n);
 }
 
-static float window_power(const float *x, const float *hann, size_t n) {
+/* Aplica a janela de Hann ao trecho e devolve a potência média janelada. */
+static float window_signal(const float *x, const float *hann, size_t n, float *xw) {
     float acc = 0.0f, norm = 0.0f;
     for (size_t i = 0; i < n; i++) {
         float v = x[i] * hann[i];
+        xw[i] = v;
         acc += v * v;
         norm += hann[i] * hann[i];
     }
@@ -346,78 +359,107 @@ typedef enum {
     SUBHARMONICS_STRONG,                // >= -25 dB e acima do ruído
 } SubharmonicEvidence;
 
-static SubharmonicEvidence subharmonics_present(const PitchDetector *p, float period_s, int k) {
+/* `energy`: com resposta NONE, as componentes do período maior ainda assim
+ * são picos reais (acima do mínimo e do ruído entre elas): a oitava abaixo
+ * pode aparecer nos trechos seguintes e a nota fica em dúvida. Vazamento da
+ * janela e ruído (picos e vales no mesmo nível) não contam. */
+static SubharmonicEvidence subharmonics_present(const PitchDetector *p, float period_s, int k,
+                                                bool *energy) {
+    *energy = false;
     const float f0 = 1.0f / period_s;
     // Notas graves (componentes a menos de 6 bins umas das outras na janela
     // aguda): janela longa da faixa grave (resolução de 12,5 Hz, até ~900 Hz).
     // As demais: janela da faixa aguda (31 Hz, até 7,2 kHz), que alcança as
     // componentes acima do harmônico (5º, 7º... quando k = 4).
     const bool use_low = f0 < 6.0f * p->high.sample_rate / (float)PITCH_HIGH_WINDOW;
-    const float *x = use_low ? p->low_window : p->high_window;
-    const float *hann = use_low ? p->low_hann : p->high_hann;
+    const float *xw = use_low ? p->low_windowed : p->high_windowed;
     const size_t n = use_low ? PITCH_LOW_WINDOW : PITCH_HIGH_WINDOW;
     const float fs = use_low ? p->low.sample_rate : p->high.sample_rate;
     const float f_max = use_low ? fs * 0.225f : fs * 0.45f;
-    const float total = window_power(x, hann, n);
+    const float total = use_low ? p->low_power : p->high_power;
     if (total <= 0.0f) return SUBHARMONICS_NONE;
     // A referência de ruído só é confiável quando meio espaçamento entre as
     // componentes cabe em 2,5 bins (fora do lóbulo principal da janela)
     const bool check_peaks = 0.5f * f0 >= 2.5f * fs / (float)n;
-    float sub = 0.0f, ref = 0.0f;
-    int used = 0, peaks = 0;
-    // m coprimo de k, abaixo E acima do harmônico candidato: um alto-falante
-    // pequeno corta a fundamental e os primeiros harmônicos (ex.: E4 com só o
-    // 4º harmônico forte), mas o 5º, o 7º... ainda revelam o período k*T
+
+    // Custo: este teste roda para cada múltiplo candidato em todo trecho com
+    // nota (dezenas de Goertzel). As medidas são feitas da mais barata para
+    // a mais cara e o teste para assim que a resposta está decidida (mesmo
+    // resultado da avaliação completa): no ESP32 o processamento de um
+    // trecho com nota ficava acima dos 16 ms do trecho e as notas chegavam
+    // ao app com atraso crescente.
+
+    // 1) Componentes: m coprimo de k, abaixo E acima do harmônico candidato
+    //    (um alto-falante pequeno corta a fundamental e os primeiros
+    //    harmônicos, ex.: E4 com só o 4º harmônico forte, mas o 5º, o 7º...
+    //    ainda revelam o período k*T)
+    float comp[8], freq[8];
+    float sub = 0.0f;
+    int used = 0;
     for (int m = 1; m <= 4 * k && used < 8; m++) {
         int a = m, b = k;
         while (b != 0) { int r = a % b; a = b; b = r; }
         if (a != 1) continue;
         const float f = f0 * (float)m;
         if (f >= f_max) break;
+        freq[used] = f;
+        comp[used] = tone_power(xw, n, f, fs);
+        sub += comp[used];
         used++;
-        const float comp = tone_power(x, hann, n, f, fs);
-        // Referência de ruído: entre as componentes (o ruído é plano; as
-        // componentes de uma nota são picos)
-        const float noise = 0.5f * (tone_power(x, hann, n, f + 0.5f * f0, fs) +
-                                    tone_power(x, hann, n, f - 0.5f * f0, fs));
-        sub += comp;
-        ref += noise;
-        if (comp >= noise * WEAK_PEAK_RATIO) {
-            // Pico centrado em f (componente da nota) e não a encosta de uma
-            // componente vizinha (ex.: cauda de outra nota a menos de 1 bin)
-            const float half_bin = 0.5f * fs / (float)n;
-            const float side = fmaxf(tone_power(x, hann, n, f - half_bin, fs),
-                                     tone_power(x, hann, n, f + half_bin, fs));
-            if (comp >= side * WEAK_CENTER_RATIO) peaks++;
-        }
     }
     if (used == 0) return SUBHARMONICS_NONE;
-    if (sub >= total * SUBHARMONIC_MIN_RATIO && (!check_peaks || sub >= ref * SUBHARMONIC_PEAK_RATIO)) {
+    // Abaixo dos dois mínimos (forte e fraco): nenhuma das respostas é possível
+    if (sub < total * SUBHARMONIC_MIN_RATIO && sub < total * WEAK_MIN_RATIO) {
+        return SUBHARMONICS_NONE;
+    }
+    if (sub >= total * SUBHARMONIC_MIN_RATIO && !check_peaks) return SUBHARMONICS_STRONG;
+
+    // 2) Referência de ruído: entre as componentes (o ruído é plano; as
+    //    componentes de uma nota são picos)
+    float noise[8];
+    float ref = 0.0f;
+    for (int i = 0; i < used; i++) {
+        noise[i] = 0.5f * (tone_power(xw, n, freq[i] + 0.5f * f0, fs) +
+                           tone_power(xw, n, freq[i] - 0.5f * f0, fs));
+        ref += noise[i];
+    }
+    if (sub >= total * SUBHARMONIC_MIN_RATIO && sub >= ref * SUBHARMONIC_PEAK_RATIO) {
         return SUBHARMONICS_STRONG;
     }
-    // Componentes fracas (o som que chega ao microfone quase não tem a nota,
-    // ex.: E4 em que só o 4º harmônico chega forte), mas nítidas: picos bem
-    // acima do ruído vizinho em pelo menos duas frequências
-    // Só quando um único harmônico domina o som (>= 50% da energia): numa
-    // mistura de duas notas (ex.: transição G6 -> A6, razão 9/8) o
-    // "período comum" das duas não é uma nota
-    const float dominant = tone_power(x, hann, n, f0 * (float)k, fs);
-    if (check_peaks && dominant >= total * WEAK_DOMINANT_RATIO && sub >= total * WEAK_MIN_RATIO &&
-        sub >= ref * WEAK_SUM_RATIO && peaks >= 2) {
-        return SUBHARMONICS_WEAK;
+
+    // 3) Componentes fracas (o som que chega ao microfone quase não tem a
+    //    nota, ex.: E4 em que só o 4º harmônico chega forte), mas nítidas:
+    //    picos bem acima do ruído vizinho em pelo menos duas frequências.
+    //    Só quando um único harmônico domina o som (>= 50% da energia): numa
+    //    mistura de duas notas (ex.: transição G6 -> A6, razão 9/8) o
+    //    "período comum" das duas não é uma nota
+    *energy = check_peaks && sub >= total * WEAK_MIN_RATIO && sub >= ref * DOUBT_SUM_RATIO;
+    if (!check_peaks || sub < total * WEAK_MIN_RATIO || sub < ref * WEAK_SUM_RATIO) {
+        return SUBHARMONICS_NONE;
     }
-    return SUBHARMONICS_NONE;
+    const float dominant = tone_power(xw, n, f0 * (float)k, fs);
+    if (dominant < total * WEAK_DOMINANT_RATIO) return SUBHARMONICS_NONE;
+    const float half_bin = 0.5f * fs / (float)n;
+    int peaks = 0;
+    for (int i = 0; i < used && peaks < 2; i++) {
+        if (comp[i] < noise[i] * WEAK_PEAK_RATIO) continue;
+        // Pico centrado em f (componente da nota) e não a encosta de uma
+        // componente vizinha (ex.: cauda de outra nota a menos de 1 bin)
+        const float side = fmaxf(tone_power(xw, n, freq[i] - half_bin, fs),
+                                 tone_power(xw, n, freq[i] + half_bin, fs));
+        if (comp[i] >= side * WEAK_CENTER_RATIO) peaks++;
+    }
+    return peaks >= 2 ? SUBHARMONICS_WEAK : SUBHARMONICS_NONE;
 }
 
 void pitch_harmonic_levels(const PitchDetector *p, float freq, float out_db[PITCH_PROBE_COUNT]) {
     static const float ratios[PITCH_PROBE_COUNT] = {0.25f, 1.0f / 3.0f, 0.5f, 1.0f, 2.0f};
-    const float total = window_power(p->high_window, p->high_hann, PITCH_HIGH_WINDOW);
+    const float total = p->high_power;
     for (int i = 0; i < PITCH_PROBE_COUNT; i++) {
         float f = freq * ratios[i];
         float power = 0.0f;
         if (freq > 0.0f && total > 0.0f && f < p->high.sample_rate * 0.45f) {
-            power = tone_power(p->high_window, p->high_hann, PITCH_HIGH_WINDOW, f,
-                               p->high.sample_rate) / total;
+            power = tone_power(p->high_windowed, PITCH_HIGH_WINDOW, f, p->high.sample_rate) / total;
         }
         out_db[i] = power > 1e-12f ? 10.0f * log10f(power) : -120.0f;
     }
@@ -425,8 +467,11 @@ void pitch_harmonic_levels(const PitchDetector *p, float freq, float out_db[PITC
 
 float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confidence) {
     pitch_push(p, hop, n);
+    p->octave_doubt = false;
     yin_cmndf(&p->high, p->high_window);
     yin_cmndf(&p->low, p->low_window);
+    p->high_power = window_signal(p->high_window, p->high_hann, PITCH_HIGH_WINDOW, p->high_windowed);
+    p->low_power = window_signal(p->low_window, p->low_hann, PITCH_LOW_WINDOW, p->low_windowed);
 
     // 1) Candidato: primeiro vale da faixa aguda; sem ele, o da faixa grave
     const YinDetector *band = &p->high;
@@ -475,15 +520,18 @@ float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confide
             bool clearly_better = value < best_value * MULTIPLE_RATIO &&
                                   best_value - value > MULTIPLE_MARGIN;
             bool not_worse = value <= best_value + WEAK_VALUE_SLACK;
+            bool energy = false;
             SubharmonicEvidence ev = (clearly_better || not_worse)
-                                         ? subharmonics_present(p, period_j, j)
+                                         ? subharmonics_present(p, period_j, j, &energy)
                                          : SUBHARMONICS_NONE;
+            if (ev == SUBHARMONICS_NONE && energy) p->octave_doubt = true;
             if ((clearly_better && ev != SUBHARMONICS_NONE) ||
                 (not_worse && ev == SUBHARMONICS_WEAK)) {
                 best_value = value;
                 band = b;
                 tau = t;
                 best_period = yin_refine(b, t) / b->sample_rate;
+                p->octave_doubt = false;            // A dúvida vale para a nova altura
                 improved = true;
                 break;
             }
@@ -513,8 +561,23 @@ float pitch_process(PitchDetector *p, const float *hop, size_t n, float *confide
         }
     }
     if (confidence) *confidence = 1.0f - fminf(1.0f, band->diff[tau]);
-    return period > 0.0f ? 1.0f / period : 0.0f;
+    const float freq = period > 0.0f ? 1.0f / period : 0.0f;
+
+    // Dúvida também quando o som é quase uma senoide (2º harmônico 20 dB
+    // abaixo): notas de piano e teclado têm harmônicos; um harmônico isolado
+    // da nota (ex.: o 4º, quando o alto-falante quase não reproduz a nota)
+    // não. Nos primeiros trechos do ataque a janela ainda não mostra as
+    // componentes da oitava de baixo, então este é o único sinal disponível.
+    if (!p->octave_doubt && freq > 0.0f && 2.0f * freq < p->high.sample_rate * 0.45f) {
+        const float own = tone_power(p->high_windowed, PITCH_HIGH_WINDOW, freq, p->high.sample_rate);
+        const float second =
+            tone_power(p->high_windowed, PITCH_HIGH_WINDOW, 2.0f * freq, p->high.sample_rate);
+        if (own > 0.0f && second < own * PURE_TONE_RATIO) p->octave_doubt = true;
+    }
+    return freq;
 }
+
+bool pitch_octave_doubt(const PitchDetector *p) { return p->octave_doubt; }
 
 float dsp_hz_to_midi(float hz) {
     if (hz <= 0.0f) return 0.0f;
